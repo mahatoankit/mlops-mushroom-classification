@@ -15,6 +15,9 @@ import yaml
 from scipy import stats
 from typing import Dict, List, Any, Optional, Tuple, Union
 
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -23,11 +26,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load configuration
+# Load configuration with better error handling
 try:
-    with open("config/config.yaml", "r") as file:
-        config = yaml.safe_load(file)
-    logger.info("Loaded configuration from config/config.yaml")
+    config_paths = [
+        "config/config.yaml",
+        "../config/config.yaml",
+        "./config.yaml",
+        "/app/config/config.yaml",  # Docker path
+    ]
+
+    config = None
+    for config_path in config_paths:
+        if os.path.exists(config_path):
+            with open(config_path, "r") as file:
+                config = yaml.safe_load(file)
+            logger.info(f"Loaded configuration from {config_path}")
+            break
+
+    if config is None:
+        config = {"ab_testing": {"default_traffic_split": 0.5}}
+        logger.warning("Configuration file not found, using defaults")
+
 except Exception as e:
     logger.error(f"Error loading configuration: {e}")
     config = {"ab_testing": {"default_traffic_split": 0.5}}

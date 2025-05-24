@@ -13,6 +13,9 @@ from sklearn.model_selection import train_test_split
 # Import model versioning
 from src.model_versioning import register_and_promote_model
 
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,

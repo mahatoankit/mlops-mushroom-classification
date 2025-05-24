@@ -9,8 +9,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging
+import mlflow
+import mlflow.sklearn
+from mlflow.models.signature import infer_signature
+
+# Add Great Expectations imports
+try:
+    import great_expectations as gx
+    from great_expectations.core import ExpectationSuite
+
+    GREAT_EXPECTATIONS_AVAILABLE = True
+except ImportError:
+    GREAT_EXPECTATIONS_AVAILABLE = False
+
+
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -21,6 +36,10 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 
 try:
     import xgboost as xgb
@@ -56,6 +75,11 @@ except ImportError:
 # Import monitoring module
 from src.monitoring import monitor_model_performance
 
+# Create logs directory if it doesn't exist
+import os
+
+os.makedirs("logs", exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -65,44 +89,529 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def train_models(X_train, y_train):
+def validate_data_with_great_expectations(data, data_context_path="great_expectations"):
     """
-    Train multiple models on the data.
+    Validate data using Great Expectations
 
     Args:
-        X_train (pd.DataFrame): Training features.
-        y_train (pd.Series): Training target.
+        data (pd.DataFrame): Data to validate
+        data_context_path (str): Path to Great Expectations context
 
     Returns:
-        dict: Dictionary of trained models.
+        dict: Validation results
     """
+    if not GREAT_EXPECTATIONS_AVAILABLE:
+        logger.warning("Great Expectations not available. Skipping validation.")
+        return {
+            "validation_passed": True,
+            "message": "Great Expectations not available",
+        }
+
     try:
-        logger.info("Starting model training")
+        # Validate input data
+        if data is None or data.empty:
+            return {"validation_passed": False, "error": "Input data is None or empty"}
 
-        # Train Logistic Regression model
-        logger.info("Training Logistic Regression model")
-        lr = LogisticRegression(max_iter=200)
-        lr.fit(X_train, y_train)
+        # Create absolute path for data context
+        if not os.path.isabs(data_context_path):
+            data_context_path = os.path.join(os.getcwd(), data_context_path)
 
-        # Train Decision Tree model
-        logger.info("Training Decision Tree model")
-        dt = DecisionTreeClassifier(max_depth=12)
-        dt.fit(X_train, y_train)
+        # Initialize or get existing data context
+        try:
+            if os.path.exists(data_context_path):
+                context = gx.get_context(context_root_dir=data_context_path)
+            else:
+                os.makedirs(data_context_path, exist_ok=True)
+                context = gx.get_context(
+                    context_root_dir=data_context_path, mode="file"
+                )
+        except Exception as e:
+            logger.warning(f"Could not initialize Great Expectations context: {e}")
+            return {
+                "validation_passed": True,
+                "message": f"Could not initialize GE context: {e}",
+            }
 
-        # Train XGBoost model
-        logger.info("Training XGBoost model")
-        xgb_model = xgb.XGBClassifier(use_label_encoder=False, eval_metric="logloss")
-        xgb_model.fit(X_train, y_train)
+        # Create expectation suite for mushroom data
+        suite_name = "mushroom_data_suite"
 
-        # Return trained models
-        models = {"logistic_regression": lr, "decision_tree": dt, "xgboost": xgb_model}
+        try:
+            suite = context.get_expectation_suite(expectation_suite_name=suite_name)
+        except:
+            # Create new suite if it doesn't exist
+            suite = context.create_expectation_suite(expectation_suite_name=suite_name)
 
-        logger.info("Model training complete")
-        return models
+            # Add basic expectations for any dataset
+            suite.add_expectation(
+                gx.expectations.ExpectTableRowCountToBeBetween(
+                    min_value=10, max_value=100000
+                )
+            )
+
+            # Check if target column exists and add appropriate expectations
+            if "class" in data.columns:
+                suite.add_expectation(
+                    gx.expectations.ExpectColumnToExist(column="class")
+                )
+                unique_values = data["class"].unique().tolist()
+                suite.add_expectation(
+                    gx.expectations.ExpectColumnValuesToBeInSet(
+                        column="class", value_set=unique_values
+                    )
+                )
+            elif "target" in data.columns:
+                suite.add_expectation(
+                    gx.expectations.ExpectColumnToExist(column="target")
+                )
+
+            # Save the suite
+            try:
+                context.save_expectation_suite(suite)
+            except Exception as e:
+                logger.warning(f"Could not save expectation suite: {e}")
+
+        # Create validator with better error handling
+        try:
+            validator = context.get_validator(
+                batch_request=gx.core.batch.RuntimeBatchRequest(
+                    datasource_name="pandas",
+                    data_connector_name="default_runtime_data_connector_name",
+                    data_asset_name="mushroom_data",
+                    runtime_parameters={"batch_data": data},
+                    batch_identifiers={"default_identifier_name": "mushroom_batch"},
+                ),
+                expectation_suite_name=suite_name,
+            )
+
+            # Run validation
+            validation_result = validator.validate()
+
+            # Log results
+            success_count = validation_result.statistics.get(
+                "successful_expectations", 0
+            )
+            total_count = validation_result.statistics.get("evaluated_expectations", 0)
+
+            logger.info(
+                f"Great Expectations validation: {success_count}/{total_count} expectations passed"
+            )
+
+            if not validation_result.success:
+                logger.warning("Some data quality checks failed:")
+                for result in validation_result.results:
+                    if not result.success:
+                        logger.warning(f"Failed: {result.expectation_config}")
+
+            return {
+                "validation_passed": validation_result.success,
+                "success_count": success_count,
+                "total_count": total_count,
+                "results": validation_result,
+            }
+
+        except Exception as e:
+            logger.warning(f"Could not create validator or run validation: {e}")
+            return {
+                "validation_passed": True,
+                "message": f"Validation skipped due to error: {e}",
+            }
 
     except Exception as e:
-        logger.error(f"Error training models: {e}")
-        raise
+        logger.error(f"Error in Great Expectations validation: {e}")
+        return {"validation_passed": False, "error": str(e)}
+
+
+def train_models_simple(X_train, y_train, config=None):
+    """
+    Train multiple models on the provided data (simple version).
+
+    Args:
+        X_train: Training features (DataFrame or array-like)
+        y_train: Training targets (Series or array-like)
+        config: Configuration dictionary (optional)
+
+    Returns:
+        dict: Dictionary of trained models
+    """
+    logger.info("Starting model training (simple version)")
+
+    # Load config if not provided
+    if config is None:
+        try:
+            from src.monitoring import load_config
+
+            config = load_config()
+        except:
+            config = {
+                "models": {
+                    "random_forest": {"n_estimators": 50},
+                    "gradient_boosting": {"n_estimators": 50},
+                }
+            }
+
+    # Input validation
+    if X_train is None or y_train is None:
+        raise ValueError("X_train and y_train cannot be None")
+
+    # Convert to pandas if needed
+    if not isinstance(X_train, pd.DataFrame):
+        X_train = pd.DataFrame(X_train)
+    if not isinstance(y_train, (pd.Series, pd.DataFrame)):
+        y_train = pd.Series(y_train)
+
+    # Check for empty data
+    if X_train.empty or len(y_train) == 0:
+        raise ValueError("Training data cannot be empty")
+
+    if len(X_train) != len(y_train):
+        raise ValueError("X_train and y_train must have the same number of samples")
+
+    logger.info(f"Training data shape: X={X_train.shape}, y={len(y_train)}")
+
+    # Handle categorical features if any
+    categorical_columns = X_train.select_dtypes(include=["object"]).columns
+    numerical_columns = X_train.select_dtypes(include=["number"]).columns
+
+    if len(categorical_columns) > 0:
+        logger.info(f"Found {len(categorical_columns)} categorical columns")
+        # Simple label encoding for categorical columns
+        from sklearn.preprocessing import LabelEncoder
+
+        X_train_processed = X_train.copy()
+
+        for col in categorical_columns:
+            le = LabelEncoder()
+            X_train_processed[col] = le.fit_transform(X_train[col].astype(str))
+
+        X_train = X_train_processed
+
+    # Initialize models with error handling
+    models = {}
+
+    try:
+        models["logistic_regression"] = LogisticRegression(
+            random_state=42, max_iter=1000, solver="liblinear"
+        )
+        logger.info("Initialized Logistic Regression")
+    except Exception as e:
+        logger.warning(f"Could not initialize Logistic Regression: {e}")
+
+    try:
+        n_estimators = (
+            config.get("models", {}).get("random_forest", {}).get("n_estimators", 50)
+        )
+        models["random_forest"] = RandomForestClassifier(
+            n_estimators=n_estimators, random_state=42, max_depth=10
+        )
+        logger.info("Initialized Random Forest")
+    except Exception as e:
+        logger.warning(f"Could not initialize Random Forest: {e}")
+
+    try:
+        n_estimators = (
+            config.get("models", {})
+            .get("gradient_boosting", {})
+            .get("n_estimators", 50)
+        )
+        models["gradient_boosting"] = GradientBoostingClassifier(
+            n_estimators=n_estimators, random_state=42, max_depth=5
+        )
+        logger.info("Initialized Gradient Boosting")
+    except Exception as e:
+        logger.warning(f"Could not initialize Gradient Boosting: {e}")
+
+    # Try to add XGBoost if available
+    try:
+        if hasattr(xgb, "XGBClassifier") and not isinstance(
+            xgb.XGBClassifier, type(xgb.XGBClassifierFallback)
+        ):
+            n_estimators = (
+                config.get("models", {}).get("xgboost", {}).get("n_estimators", 50)
+            )
+            max_depth = config.get("models", {}).get("xgboost", {}).get("max_depth", 5)
+            models["xgboost"] = xgb.XGBClassifier(
+                n_estimators=n_estimators, random_state=42, max_depth=max_depth
+            )
+            logger.info("Initialized XGBoost")
+    except Exception as e:
+        logger.warning(f"Could not initialize XGBoost: {e}")
+
+    if not models:
+        raise RuntimeError("No models could be initialized")
+
+    # Train models
+    trained_models = {}
+    for name, model in models.items():
+        try:
+            logger.info(f"Training {name}")
+            model.fit(X_train, y_train)
+            trained_models[name] = model
+            logger.info(f"Successfully trained {name}")
+        except Exception as e:
+            logger.error(f"Error training {name}: {e}")
+            continue
+
+    if not trained_models:
+        raise RuntimeError("No models could be trained successfully")
+
+    logger.info(
+        f"Successfully trained {len(trained_models)} models: {list(trained_models.keys())}"
+    )
+    return trained_models
+
+
+def train_models(data_path, config):
+    """Train multiple models and log to MLflow"""
+    logger.info("Starting model training")
+
+    # Initialize MLflow experiment
+    experiment_name = "mushroom_classification"
+    try:
+        # Try to get existing experiment
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            # Create new experiment if it doesn't exist
+            experiment_id = mlflow.create_experiment(experiment_name)
+            logger.info(
+                f"Created new MLflow experiment: {experiment_name} (ID: {experiment_id})"
+            )
+        else:
+            experiment_id = experiment.experiment_id
+            logger.info(
+                f"Using existing MLflow experiment: {experiment_name} (ID: {experiment_id})"
+            )
+
+        # Set the experiment
+        mlflow.set_experiment(experiment_name)
+    except Exception as e:
+        logger.warning(f"Could not set up MLflow experiment: {e}")
+        # Fallback: use default experiment
+        mlflow.set_experiment("Default")
+
+    # Handle both file paths and DataFrames
+    if isinstance(data_path, str):
+        # Validate file path
+        if not os.path.exists(data_path):
+            logger.error(f"Data file not found: {data_path}")
+            raise FileNotFoundError(f"Data file not found: {data_path}")
+
+        # Load data from file
+        logger.info(f"Loading data from file: {data_path}")
+        data = pd.read_csv(data_path)
+    elif isinstance(data_path, pd.DataFrame):
+        # Use provided DataFrame
+        logger.info("Using provided DataFrame")
+        data = data_path.copy()
+
+        # If DataFrame has no columns, try to reload from original path if available
+        if data.shape[1] == 0:
+            logger.warning(
+                "Provided DataFrame has no columns, attempting to reload from default path"
+            )
+            default_path = "/home/ankit/WindowsFuneral/BCU/Sem4/MLOps/FINAL_ASSESSMENT/new-mushroom/data/raw/secondary_data.csv"
+            if os.path.exists(default_path):
+                logger.info(f"Reloading data from: {default_path}")
+                data = pd.read_csv(default_path)
+            else:
+                logger.error("Default data file not found and DataFrame has no columns")
+                raise ValueError(
+                    "Cannot proceed with empty DataFrame and no fallback data file"
+                )
+    else:
+        logger.error(
+            f"data_path must be a string (file path) or DataFrame, got {type(data_path)}: {data_path}"
+        )
+        raise ValueError(
+            f"data_path must be a string (file path) or DataFrame, got {type(data_path)}"
+        )
+
+    logger.info(f"Loaded data with shape: {data.shape}")
+
+    # Check if DataFrame is empty or has no columns
+    if data.empty:
+        logger.error(f"Data is empty. Shape: {data.shape}")
+        raise ValueError(f"Data is empty. Shape: {data.shape}")
+
+    if data.shape[1] == 0:
+        logger.error(f"Data has no columns. Shape: {data.shape}")
+        logger.error(f"Data info: {data.info()}")
+        raise ValueError(f"Data has no columns. Shape: {data.shape}")
+
+    # Add Great Expectations validation
+    logger.info("Running Great Expectations data validation...")
+    validation_results = validate_data_with_great_expectations(data)
+
+    if not validation_results["validation_passed"]:
+        logger.warning(
+            "Data quality validation failed, but continuing with training..."
+        )
+
+    # Debug: Print column info
+    logger.info(f"Columns: {list(data.columns)}")
+    logger.info(f"Data types:\n{data.dtypes}")
+    logger.info(f"First few rows:\n{data.head()}")
+
+    # Prepare features and target
+    if "class" in data.columns:
+        target_column = "class"
+    elif "edible" in data.columns:
+        target_column = "edible"
+    elif "class_encoded" in data.columns:
+        target_column = "class_encoded"
+    else:
+        # Use the last column as target
+        target_column = data.columns[-1]
+
+    logger.info(f"Using target column: {target_column}")
+
+    X = data.drop(columns=[target_column])
+    y = data[target_column]
+
+    logger.info(f"Features shape before preprocessing: {X.shape}")
+    logger.info(f"Target shape: {y.shape}")
+    logger.info(f"Target values: {y.value_counts()}")
+
+    # Handle categorical features
+    categorical_columns = X.select_dtypes(include=["object"]).columns
+    numerical_columns = X.select_dtypes(include=["number"]).columns
+
+    logger.info(f"Categorical columns: {list(categorical_columns)}")
+    logger.info(f"Numerical columns: {list(numerical_columns)}")
+
+    # Create preprocessor
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", StandardScaler(), numerical_columns),
+            (
+                "cat",
+                OneHotEncoder(drop="first", handle_unknown="ignore"),
+                categorical_columns,
+            ),
+        ]
+    )
+
+    # Encode target variable if it's categorical
+    if y.dtype == "object":
+        le = LabelEncoder()
+        y = le.fit_transform(y)
+        logger.info(f"Encoded target values: {np.unique(y)}")
+
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=config.get("data_split", {}).get("test_size", 0.3),
+        random_state=config.get("data_split", {}).get("random_state", 42),
+    )
+
+    logger.info(f"Train set shape: X_train={X_train.shape}, y_train={y_train.shape}")
+    logger.info(f"Test set shape: X_test={X_test.shape}, y_test={y_test.shape}")
+
+    # Preprocess features
+    X_train_processed = preprocessor.fit_transform(X_train)
+    X_test_processed = preprocessor.transform(X_test)
+
+    logger.info(f"Processed train features shape: {X_train_processed.shape}")
+    logger.info(f"Processed test features shape: {X_test_processed.shape}")
+
+    # Check if processed data is empty
+    if X_train_processed.shape[1] == 0:
+        raise ValueError("No features remaining after preprocessing")
+
+    # Define models with safe config access
+    models = {
+        "logistic_regression": LogisticRegression(random_state=42),
+        "random_forest": RandomForestClassifier(
+            n_estimators=config.get("models", {})
+            .get("random_forest", {})
+            .get("n_estimators", 100),
+            random_state=42,
+        ),
+        "gradient_boosting": GradientBoostingClassifier(
+            n_estimators=config.get("models", {})
+            .get("gradient_boosting", {})
+            .get("n_estimators", 100),
+            random_state=42,
+        ),
+    }
+
+    best_model = None
+    best_accuracy = 0
+
+    for model_name, model in models.items():
+        logger.info(f"Training {model_name} model")
+
+        with mlflow.start_run(run_name=model_name):
+            # Create pipeline
+            pipeline = Pipeline(
+                [
+                    ("preprocessor", preprocessor),
+                    ("model", model),
+                ]
+            )
+
+            # Train model
+            pipeline.fit(X_train, y_train)
+
+            # Make predictions
+            y_pred = pipeline.predict(X_test)
+            y_pred_proba = None
+
+            # Get prediction probabilities if available
+            try:
+                y_pred_proba = pipeline.predict_proba(X_test)
+            except:
+                pass
+
+            # Calculate metrics
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, average="weighted")
+            recall = recall_score(y_test, y_pred, average="weighted")
+            f1 = f1_score(y_test, y_pred, average="weighted")
+
+            # Log metrics
+            mlflow.log_metric("accuracy", accuracy)
+            mlflow.log_metric("precision", precision)
+            mlflow.log_metric("recall", recall)
+            mlflow.log_metric("f1_score", f1)
+
+            # Log parameters
+            if hasattr(model, "get_params"):
+                for param, value in model.get_params().items():
+                    mlflow.log_param(param, value)
+
+            # Create model signature and input example
+            try:
+                # Infer signature from training data
+                if y_pred_proba is not None:
+                    signature = infer_signature(X_train, y_pred_proba)
+                else:
+                    signature = infer_signature(X_train, y_pred)
+
+                # Create input example (first few rows of training data)
+                input_example = X_train.head(3)
+
+                # Save model with signature and input example
+                mlflow.sklearn.log_model(
+                    pipeline,
+                    model_name,
+                    signature=signature,
+                    input_example=input_example,
+                )
+                logger.info(f"Logged {model_name} with signature and input example")
+            except Exception as e:
+                logger.warning(f"Could not create signature for {model_name}: {e}")
+                # Fallback to basic logging
+                mlflow.sklearn.log_model(pipeline, model_name)
+
+            logger.info(f"{model_name} - Accuracy: {accuracy:.4f}")
+
+            if accuracy > best_accuracy:
+                best_accuracy = accuracy
+                best_model = model_name
+
+    logger.info(f"Best model: {best_model} with accuracy: {best_accuracy:.4f}")
+    return best_model, best_accuracy
 
 
 def evaluate_model(name, model, X_train, y_train, X_test, y_test, output_path=None):

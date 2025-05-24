@@ -16,6 +16,9 @@ from sklearn.metrics import confusion_matrix, roc_auc_score
 from scipy.stats import ks_2samp
 import yaml
 
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -24,14 +27,69 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load configuration
+
+def load_config(config_path=None):
+    """
+    Load configuration from YAML file with fallback options.
+
+    Args:
+        config_path (str, optional): Path to config file. If None, tries default paths.
+
+    Returns:
+        dict: Configuration dictionary
+    """
+    default_config = {
+        "monitoring": {"threshold": 0.05},
+        "paths": {
+            "raw_data": "data/raw",
+            "processed_data": "data/processed",
+            "models": "models",
+            "metrics": "models/metrics",
+        },
+        "models": {
+            "random_forest": {"n_estimators": 100},
+            "xgboost": {"n_estimators": 100, "max_depth": 6},
+            "gradient_boosting": {"n_estimators": 100},
+        },
+        "data_split": {"test_size": 0.3, "random_state": 42},
+    }
+
+    if config_path is None:
+        # Try multiple possible config paths
+        config_paths = [
+            "config/config.yaml",
+            "../config/config.yaml",
+            "./config.yaml",
+            "/app/config/config.yaml",  # Docker path
+            os.path.join(os.path.dirname(__file__), "../config/config.yaml"),
+        ]
+    else:
+        config_paths = [config_path]
+
+    for path in config_paths:
+        try:
+            if os.path.exists(path):
+                with open(path, "r") as file:
+                    config = yaml.safe_load(file)
+                    logger.info(f"Loaded configuration from {path}")
+                    # Merge with defaults to ensure all keys exist
+                    merged_config = default_config.copy()
+                    merged_config.update(config)
+                    return merged_config
+        except Exception as e:
+            logger.warning(f"Could not load config from {path}: {e}")
+            continue
+
+    logger.warning("No configuration file found, using defaults")
+    return default_config
+
+
+# Load configuration with better error handling
 try:
-    with open("config/config.yaml", "r") as file:
-        config = yaml.safe_load(file)
-    logger.info(f"Loaded configuration from config/config.yaml")
+    config = load_config()
 except Exception as e:
     logger.error(f"Error loading configuration: {e}")
-    config = {"monitoring": {"threshold": 0.05}}
+    config = load_config()  # This will return defaults
 
 
 class ModelMonitor:
@@ -100,46 +158,108 @@ class ModelMonitor:
         """
         drift_metrics = {}
 
-        for column in X_reference.columns:
+        # Validate inputs
+        if X_reference is None or X_current is None:
+            logger.error("Reference or current data is None")
+            return drift_metrics
+
+        if X_reference.empty or X_current.empty:
+            logger.error("Reference or current data is empty")
+            return drift_metrics
+
+        # Ensure we only compare common columns
+        common_columns = set(X_reference.columns).intersection(set(X_current.columns))
+        if not common_columns:
+            logger.warning("No common columns found between reference and current data")
+            return drift_metrics
+
+        for column in common_columns:
             try:
-                # Perform K-S test
-                # Check for data types to ensure proper KS test
-                ks_result = ks_2samp(
-                    X_reference[column].dropna().values,
-                    X_current[column].dropna().values,
-                )
+                # Get the data for this column
+                ref_data = X_reference[column].dropna()
+                curr_data = X_current[column].dropna()
 
-                # Handle different return types from ks_2samp
-                # Always treat as tuple to ensure compatibility
-                if isinstance(ks_result, tuple) and len(ks_result) >= 2:
-                    ks_statistic = ks_result[0]
-                    p_value = ks_result[1]
-                else:
-                    # If it's not properly unpacking, use a safer default
-                    ks_statistic = 0.0
-                    p_value = 1.0
+                # Skip if either dataset is empty after dropping NaN
+                if len(ref_data) == 0 or len(curr_data) == 0:
                     logger.warning(
-                        f"Could not unpack KS test result for column {column}, using default values"
+                        f"Skipping column {column}: empty data after dropping NaN"
                     )
+                    continue
 
-                # Ensure they're proper floats
-                ks_statistic = float(str(ks_statistic).replace(",", "."))
-                p_value = float(str(p_value).replace(",", "."))
+                # Handle categorical data by converting to numeric codes
+                if ref_data.dtype == "object" or curr_data.dtype == "object":
+                    try:
+                        # Combine unique values from both datasets
+                        all_values = pd.concat([ref_data, curr_data]).unique()
+                        value_map = {val: idx for idx, val in enumerate(all_values)}
 
-                # Record drift metrics
-                drift_metrics[column] = {
-                    "ks_statistic": ks_statistic,
-                    "p_value": p_value,
-                    "has_drift": p_value < self.drift_threshold,
-                }
+                        ref_numeric = ref_data.map(value_map).dropna()
+                        curr_numeric = curr_data.map(value_map).dropna()
 
-                if p_value < self.drift_threshold:
-                    logger.warning(
-                        f"Drift detected in feature {column}: KS={ks_statistic:.4f}, p={p_value:.4f}"
-                    )
+                        if len(ref_numeric) == 0 or len(curr_numeric) == 0:
+                            continue
+
+                        ref_data = ref_numeric
+                        curr_data = curr_numeric
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not convert categorical data for column {column}: {e}"
+                        )
+                        continue
+
+                # Perform K-S test with proper error handling
+                try:
+                    ks_result = ks_2samp(ref_data.values, curr_data.values)
+
+                    # Extract results safely
+                    if hasattr(ks_result, "statistic") and hasattr(ks_result, "pvalue"):
+                        # scipy >= 1.9.0 format
+                        ks_statistic = float(ks_result.statistic)
+                        p_value = float(ks_result.pvalue)
+                    elif isinstance(ks_result, tuple) and len(ks_result) >= 2:
+                        # older scipy format
+                        ks_statistic = float(ks_result[0])
+                        p_value = float(ks_result[1])
+                    else:
+                        logger.warning(
+                            f"Unexpected KS test result format for column {column}"
+                        )
+                        continue
+
+                    # Validate results
+                    if np.isnan(ks_statistic) or np.isnan(p_value):
+                        logger.warning(f"KS test returned NaN for column {column}")
+                        continue
+
+                    # Record drift metrics
+                    drift_metrics[column] = {
+                        "ks_statistic": ks_statistic,
+                        "p_value": p_value,
+                        "has_drift": p_value < self.drift_threshold,
+                        "sample_size_ref": len(ref_data),
+                        "sample_size_curr": len(curr_data),
+                    }
+
+                    if p_value < self.drift_threshold:
+                        logger.warning(
+                            f"Drift detected in feature {column}: KS={ks_statistic:.4f}, p={p_value:.4f}"
+                        )
+                    else:
+                        logger.info(
+                            f"No drift detected in feature {column}: KS={ks_statistic:.4f}, p={p_value:.4f}"
+                        )
+
+                except Exception as e:
+                    logger.error(f"Error performing KS test for feature {column}: {e}")
+                    continue
+
             except Exception as e:
-                logger.error(f"Error detecting drift for feature {column}: {e}")
+                logger.error(
+                    f"Error processing feature {column} for drift detection: {e}"
+                )
+                continue
 
+        logger.info(f"Drift detection completed for {len(drift_metrics)} features")
         return drift_metrics
 
     def plot_metrics_trend(self):

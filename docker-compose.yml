@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database for Airflow
+  postgres:
+    image: postgres:13
+    container_name: mushroom-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - mushroom-network
+
+  # Airflow webserver
+  airflow-webserver:
+    build: .
+    container_name: mushroom-airflow-webserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=true
+      - AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT=60
+      - PYTHONPATH=/app
+      - ENV=docker
+    volumes:
+      - ./dags:/app/dags
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./src:/app/src
+      - ./config:/app/config
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "
+        echo 'Waiting for database...' &&
+        sleep 10 &&
+        airflow db init &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin &&
+        airflow webserver --port 8080
+      "
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - mushroom-network
+
+  # Airflow scheduler
+  airflow-scheduler:
+    build: .
+    container_name: mushroom-airflow-scheduler
+    depends_on:
+      airflow-webserver:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - PYTHONPATH=/app
+      - ENV=docker
+    volumes:
+      - ./dags:/app/dags
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./src:/app/src
+      - ./config:/app/config
+    command: >
+      bash -c "
+        echo 'Waiting for webserver...' &&
+        sleep 30 &&
+        airflow scheduler
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(hostname)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - mushroom-network
+
+  # Standalone ETL application (optional - use profile to run)
+  mushroom-app:
+    build: .
+    container_name: mushroom-etl-standalone
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./src:/app/src
+      - ./config:/app/config
+    environment:
+      - PYTHONPATH=/app
+      - ENV=docker
+    command: python dags/mushroom_etl_dag.py
+    networks:
+      - mushroom-network
+    profiles:
+      - standalone
+
+volumes:
+  postgres_data:
+
+networks:
+  mushroom-network:
+    driver: bridge

@@ -6,8 +6,12 @@ Responsible for data preprocessing, cleaning, and feature engineering.
 import pandas as pd
 import numpy as np
 import logging
+import os
 from sklearn.preprocessing import LabelEncoder
 from scipy.stats import zscore
+
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
