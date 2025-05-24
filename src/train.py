@@ -221,145 +221,6 @@ def validate_data_with_great_expectations(data, data_context_path="great_expecta
         return {"validation_passed": False, "error": str(e)}
 
 
-def train_models_simple(X_train, y_train, config=None):
-    """
-    Train multiple models on the provided data (simple version).
-
-    Args:
-        X_train: Training features (DataFrame or array-like)
-        y_train: Training targets (Series or array-like)
-        config: Configuration dictionary (optional)
-
-    Returns:
-        dict: Dictionary of trained models
-    """
-    logger.info("Starting model training (simple version)")
-
-    # Load config if not provided
-    if config is None:
-        try:
-            from src.monitoring import load_config
-
-            config = load_config()
-        except:
-            config = {
-                "models": {
-                    "random_forest": {"n_estimators": 50},
-                    "gradient_boosting": {"n_estimators": 50},
-                }
-            }
-
-    # Input validation
-    if X_train is None or y_train is None:
-        raise ValueError("X_train and y_train cannot be None")
-
-    # Convert to pandas if needed
-    if not isinstance(X_train, pd.DataFrame):
-        X_train = pd.DataFrame(X_train)
-    if not isinstance(y_train, (pd.Series, pd.DataFrame)):
-        y_train = pd.Series(y_train)
-
-    # Check for empty data
-    if X_train.empty or len(y_train) == 0:
-        raise ValueError("Training data cannot be empty")
-
-    if len(X_train) != len(y_train):
-        raise ValueError("X_train and y_train must have the same number of samples")
-
-    logger.info(f"Training data shape: X={X_train.shape}, y={len(y_train)}")
-
-    # Handle categorical features if any
-    categorical_columns = X_train.select_dtypes(include=["object"]).columns
-    numerical_columns = X_train.select_dtypes(include=["number"]).columns
-
-    if len(categorical_columns) > 0:
-        logger.info(f"Found {len(categorical_columns)} categorical columns")
-        # Simple label encoding for categorical columns
-        from sklearn.preprocessing import LabelEncoder
-
-        X_train_processed = X_train.copy()
-
-        for col in categorical_columns:
-            le = LabelEncoder()
-            X_train_processed[col] = le.fit_transform(X_train[col].astype(str))
-
-        X_train = X_train_processed
-
-    # Initialize models with error handling
-    models = {}
-
-    try:
-        models["logistic_regression"] = LogisticRegression(
-            random_state=42, max_iter=1000, solver="liblinear"
-        )
-        logger.info("Initialized Logistic Regression")
-    except Exception as e:
-        logger.warning(f"Could not initialize Logistic Regression: {e}")
-
-    try:
-        n_estimators = (
-            config.get("models", {}).get("random_forest", {}).get("n_estimators", 50)
-        )
-        models["random_forest"] = RandomForestClassifier(
-            n_estimators=n_estimators, random_state=42, max_depth=10
-        )
-        logger.info("Initialized Random Forest")
-    except Exception as e:
-        logger.warning(f"Could not initialize Random Forest: {e}")
-
-    try:
-        n_estimators = (
-            config.get("models", {})
-            .get("gradient_boosting", {})
-            .get("n_estimators", 50)
-        )
-        models["gradient_boosting"] = GradientBoostingClassifier(
-            n_estimators=n_estimators, random_state=42, max_depth=5
-        )
-        logger.info("Initialized Gradient Boosting")
-    except Exception as e:
-        logger.warning(f"Could not initialize Gradient Boosting: {e}")
-
-    # Try to add XGBoost if available
-    try:
-        if hasattr(xgb, "XGBClassifier") and not isinstance(
-            xgb.XGBClassifier, type(xgb.XGBClassifierFallback)
-        ):
-            n_estimators = (
-                config.get("models", {}).get("xgboost", {}).get("n_estimators", 50)
-            )
-            max_depth = config.get("models", {}).get("xgboost", {}).get("max_depth", 5)
-            models["xgboost"] = xgb.XGBClassifier(
-                n_estimators=n_estimators, random_state=42, max_depth=max_depth
-            )
-            logger.info("Initialized XGBoost")
-    except Exception as e:
-        logger.warning(f"Could not initialize XGBoost: {e}")
-
-    if not models:
-        raise RuntimeError("No models could be initialized")
-
-    # Train models
-    trained_models = {}
-    for name, model in models.items():
-        try:
-            logger.info(f"Training {name}")
-            model.fit(X_train, y_train)
-            trained_models[name] = model
-            logger.info(f"Successfully trained {name}")
-        except Exception as e:
-            logger.error(f"Error training {name}: {e}")
-            continue
-
-    if not trained_models:
-        raise RuntimeError("No models could be trained successfully")
-
-    logger.info(
-        f"Successfully trained {len(trained_models)} models: {list(trained_models.keys())}"
-    )
-    return trained_models
-
-
 def train_models(data_path, config):
     """Train multiple models and log to MLflow"""
     logger.info("Starting model training")
@@ -424,6 +285,16 @@ def train_models(data_path, config):
         raise ValueError(
             f"data_path must be a string (file path) or DataFrame, got {type(data_path)}"
         )
+
+    # If no valid data was loaded and secondary_data.csv exists, use it as fallback
+    if (data is None or data.empty) and not isinstance(data_path, str):
+        secondary_path = "/home/ankit/WindowsFuneral/BCU/Sem4/MLOps/FINAL_ASSESSMENT/new-mushroom/data/raw/secondary_data.csv"
+        if os.path.exists(secondary_path):
+            logger.info(f"Using secondary dataset as fallback: {secondary_path}")
+            data = pd.read_csv(secondary_path)
+        else:
+            logger.error("Secondary data file not found")
+            raise FileNotFoundError("No valid data source found")
 
     logger.info(f"Loaded data with shape: {data.shape}")
 
@@ -535,8 +406,27 @@ def train_models(data_path, config):
         ),
     }
 
+    # Try to add XGBoost if available
+    try:
+        if hasattr(xgb, "XGBClassifier") and not isinstance(
+            xgb.XGBClassifier, type(xgb.XGBClassifierFallback)
+        ):
+            models["xgboost"] = xgb.XGBClassifier(
+                n_estimators=config.get("models", {})
+                .get("xgboost", {})
+                .get("n_estimators", 100),
+                max_depth=config.get("models", {})
+                .get("xgboost", {})
+                .get("max_depth", 6),
+                random_state=42,
+            )
+            logger.info("Added XGBoost to training models")
+    except Exception as e:
+        logger.warning(f"Could not add XGBoost to training: {e}")
+
     best_model = None
     best_accuracy = 0
+    trained_models = {}  # Add this to store actual models
 
     for model_name, model in models.items():
         logger.info(f"Training {model_name} model")
@@ -552,6 +442,7 @@ def train_models(data_path, config):
 
             # Train model
             pipeline.fit(X_train, y_train)
+            trained_models[model_name] = pipeline  # Store the trained pipeline
 
             # Make predictions
             y_pred = pipeline.predict(X_test)
@@ -611,7 +502,12 @@ def train_models(data_path, config):
                 best_model = model_name
 
     logger.info(f"Best model: {best_model} with accuracy: {best_accuracy:.4f}")
-    return best_model, best_accuracy
+    # Store trained_models as a module-level variable for access if needed
+    train_models.trained_models = trained_models
+    return (
+        best_model,
+        best_accuracy,
+    )  # Keep original signature for backward compatibility
 
 
 def evaluate_model(name, model, X_train, y_train, X_test, y_test, output_path=None):
@@ -633,23 +529,68 @@ def evaluate_model(name, model, X_train, y_train, X_test, y_test, output_path=No
     try:
         logger.info(f"Evaluating {name} model")
 
+        # Check if the model has preprocessing information stored
+        if hasattr(model, "X_processed_columns") and hasattr(
+            model, "categorical_columns_original"
+        ):
+            logger.info("Model has preprocessing info - applying same transformations")
+
+            # Apply the same preprocessing as during training
+            X_train_processed = X_train.copy()
+            X_test_processed = X_test.copy()
+
+            # Get the categorical columns that were encoded during training
+            categorical_columns = model.categorical_columns_original
+
+            # Apply one-hot encoding if there were categorical columns
+            if len(categorical_columns) > 0:
+                logger.info(f"Applying one-hot encoding to: {categorical_columns}")
+                X_train_processed = pd.get_dummies(
+                    X_train_processed, columns=categorical_columns, drop_first=True
+                )
+                X_test_processed = pd.get_dummies(
+                    X_test_processed, columns=categorical_columns, drop_first=True
+                )
+
+            # Ensure column order matches training
+            expected_columns = model.X_processed_columns
+
+            # Add missing columns with zeros
+            for col in expected_columns:
+                if col not in X_train_processed.columns:
+                    X_train_processed[col] = 0
+                if col not in X_test_processed.columns:
+                    X_test_processed[col] = 0
+
+            # Reorder columns to match training
+            X_train_processed = X_train_processed[expected_columns]
+            X_test_processed = X_test_processed[expected_columns]
+
+            logger.info(
+                f"Processed data shapes: train={X_train_processed.shape}, test={X_test_processed.shape}"
+            )
+        else:
+            logger.warning("Model doesn't have preprocessing info - using data as-is")
+            X_train_processed = X_train
+            X_test_processed = X_test
+
         # Generate predictions
-        y_pred_train = model.predict(X_train)
-        y_pred_test = model.predict(X_test)
+        y_pred_train = model.predict(X_train_processed)
+        y_pred_test = model.predict(X_test_processed)
 
         # Calculate metrics
         metrics = {
             "accuracy": accuracy_score(y_test, y_pred_test),
-            "precision": precision_score(y_test, y_pred_test),
-            "recall": recall_score(y_test, y_pred_test),
-            "f1_score": f1_score(y_test, y_pred_test),
+            "precision": precision_score(y_test, y_pred_test, zero_division=0),
+            "recall": recall_score(y_test, y_pred_test, zero_division=0),
+            "f1_score": f1_score(y_test, y_pred_test, zero_division=0),
             "mcc": matthews_corrcoef(y_test, y_pred_test),
         }
 
         # Try to get ROC AUC if model supports predict_proba
         try:
             if hasattr(model, "predict_proba"):
-                y_prob_test = model.predict_proba(X_test)[:, 1]
+                y_prob_test = model.predict_proba(X_test_processed)[:, 1]
                 metrics["roc_auc"] = roc_auc_score(y_test, y_prob_test)
                 logger.info(f"ROC AUC (Test): {metrics['roc_auc']}")
         except Exception as e:
@@ -696,7 +637,11 @@ def evaluate_model(name, model, X_train, y_train, X_test, y_test, output_path=No
         )
         try:
             monitoring_metrics = monitor_model_performance(
-                model, X_test, y_test, X_reference=X_train, metrics_path=monitoring_path
+                model,
+                X_test_processed,
+                y_test,
+                X_reference=X_train_processed,
+                metrics_path=monitoring_path,
             )
 
             # Add monitoring info to metrics

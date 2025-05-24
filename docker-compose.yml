@@ -20,6 +20,22 @@ services:
     networks:
       - mushroom-network
 
+  # Redis service for Airflow
+  redis:
+    image: redis:7.2-bookworm
+    container_name: mushroom-redis
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - mushroom-network
+
   # Airflow webserver
   airflow-webserver:
     build: .
@@ -27,13 +43,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://airflow:airflow@postgres/airflow
+      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
       - AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
-      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      - AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK=true
       - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=true
       - AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT=60
       - PYTHONPATH=/app
@@ -49,7 +70,7 @@ services:
       - "8080:8080"
     command: >
       bash -c "
-        echo 'Waiting for database...' &&
+        echo 'Waiting for database and redis...' &&
         sleep 10 &&
         airflow db init &&
         airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin &&
@@ -122,8 +143,30 @@ services:
     profiles:
       - standalone
 
+  # MLflow standalone server
+  mlflow-standalone:
+    image: python:3.9-slim
+    container_name: mlflow-server
+    ports:
+      - "5001:5000"  # Alternative MLflow port
+    volumes:
+      - ./mlruns:/mlruns
+      - ./mlflow_artifacts:/mlflow_artifacts
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlruns/mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow_artifacts
+    command: |
+      bash -c "
+        pip install mlflow==2.8.1 &&
+        mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlruns/mlflow.db --default-artifact-root /mlflow_artifacts
+      "
+    networks:
+      - mushroom-network
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  mlflow_artifacts:
 
 networks:
   mushroom-network:
