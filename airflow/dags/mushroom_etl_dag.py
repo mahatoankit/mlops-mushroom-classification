@@ -39,6 +39,19 @@ try:
     import sys
 
     sys.path.insert(0, PROJECT_ROOT)
+    
+    # Temporarily modify any logging configuration in imported modules
+    import logging
+    
+    # Configure root logger to prevent permission errors
+    os.makedirs(f"{PROJECT_ROOT}/logs", exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler()]  # Only use stream handler for now
+    )
+    
+    # Now import the modules
     from src.extract import extract_data
     from src.transform import transform_data
     from src.load import load_data, save_model
