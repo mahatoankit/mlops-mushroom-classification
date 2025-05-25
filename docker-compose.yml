@@ -38,7 +38,8 @@ services:
 
   # Airflow webserver
   airflow-webserver:
-    build: .
+    build:
+      context: . # Assumes Dockerfile is in the same directory as docker-compose.yml
     container_name: mushroom-airflow-webserver
     depends_on:
       postgres:
@@ -46,94 +47,115 @@ services:
       redis:
         condition: service_healthy
     environment:
+      # Consistent AIRFLOW_HOME with Dockerfile's ENV
+      - AIRFLOW_HOME=/app/airflow
+      # Core Airflow settings
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
-      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://airflow:airflow@postgres/airflow
-      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
-      - AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
+      - AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg= # Keep your existing key
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
-      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
-      - AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK=true
+      # Authentication settings for Airflow 2.6+ (using FAB)
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.session
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      # Webserver specific settings
       - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=true
+      # Celery settings (not strictly needed for LocalExecutor, but harmless if set)
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://airflow:airflow@postgres/airflow
+      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
+      # Other settings
+      - AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK=true
       - AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT=60
-      - AIRFLOW__CORE__XCOM_BACKEND=airflow.models.xcom.BaseXCom
-      - PYTHONPATH=/app
-      - ENV=docker
+      - AIRFLOW__CORE__XCOM_BACKEND=airflow.models.xcom.BaseXCom # Explicitly set to default
+      - ENV=docker # Your custom env var
     volumes:
-      - ./airflow/dags:/app/dags
+      # Mount volumes according to AIRFLOW_HOME=/app/airflow
+      - ./airflow/dags:/app/airflow/dags
+      - ./airflow/logs:/app/airflow/logs
+      - ./airflow/plugins:/app/airflow/plugins
+      # Application specific mounts
       - ./data:/app/data
       - ./models:/app/models
-      - ./logs:/app/logs
       - ./src:/app/src
       - ./config:/app/config
     ports:
       - "8080:8080"
+    command: ["webserver", "--port", "8080"] # Command passed to entry_point.sh
     healthcheck:
       test: ["CMD-SHELL", "curl --fail http://localhost:8080/health || exit 1"]
       interval: 60s
-      timeout: 30s
-      retries: 15
+      timeout: 10s
+      retries: 5
       start_period: 180s
     restart: unless-stopped
     networks:
       - mushroom-network
 
-  
   # Airflow scheduler
   airflow-scheduler:
-    build: .
+    build:
+      context: .
     container_name: mushroom-airflow-scheduler
     depends_on:
-      airflow-webserver:
+      postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     environment:
+      # Consistent AIRFLOW_HOME with Dockerfile's ENV
+      - AIRFLOW_HOME=/app/airflow
+      # Core Airflow settings
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
-      - AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
+      - AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg= # Keep your existing key
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
-      - AIRFLOW__CORE__XCOM_BACKEND=airflow.models.xcom.BaseXCom
-      - PYTHONPATH=/app
-      - ENV=docker
+      # Celery settings (not strictly needed for LocalExecutor)
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://airflow:airflow@postgres/airflow
+      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
+      # Other settings
+      - AIRFLOW__CORE__XCOM_BACKEND=airflow.models.xcom.BaseXCom # Explicitly set to default
+      - ENV=docker # Your custom env var
     volumes:
-      - ./airflow/dags:/app/dags
+      # Mount volumes according to AIRFLOW_HOME=/app/airflow
+      - ./airflow/dags:/app/airflow/dags
+      - ./airflow/logs:/app/airflow/logs
+      - ./airflow/plugins:/app/airflow/plugins
+      # Application specific mounts
       - ./data:/app/data
       - ./models:/app/models
-      - ./logs:/app/logs
       - ./src:/app/src
       - ./config:/app/config
-    command: >
-      bash -c "
-        echo 'Waiting for webserver...' &&
-        sleep 30 &&
-        airflow scheduler
-      "
+    command: ["scheduler"] # Command passed to entry_point.sh
     healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(hostname)"]
-      interval: 30s
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(hostname) || exit 1"]
+      interval: 60s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 180s
     restart: unless-stopped
     networks:
       - mushroom-network
 
-  # Standalone ETL application (optional - use profile to run)
+  # Standalone ETL application
   mushroom-app:
-    build: .
+    build: . # Uses the same Dockerfile as Airflow services
     container_name: mushroom-etl-standalone
     volumes:
-      - ./airflow/dags:/app/dags
+      # These volumes should align with where the script expects them inside the container (e.g., /app/...)
+      - ./airflow/dags:/app/airflow/dags # If it needs to access DAG definition files
       - ./data:/app/data
       - ./models:/app/models
-      - ./logs:/app/logs
-      - ./src:/app/src
+      - ./src:/app/src # Assuming your ETL script is in src
       - ./config:/app/config
     environment:
-      - PYTHONPATH=/app
-      - ENV=docker
-    command: python airflow/dags/mushroom_etl_dag.py
+      - ENV=docker # Your custom env var
+      # Add any DB connection vars if needed by the script directly
+      # - POSTGRES_HOST=postgres
+      # - POSTGRES_USER=airflow
+      # - POSTGRES_PASSWORD=airflow
+      # - POSTGRES_DB=airflow
+    command: python src/mushroom_etl_dag.py # Adjusted path assuming script is in src
     networks:
       - mushroom-network
     profiles:
@@ -142,7 +164,7 @@ services:
   # MLflow standalone server
   mlflow-standalone:
     image: python:3.9-slim
-    container_name: mlflow-server
+    container_name: mlflow-server # This matches the MLFLOW_TRACKING_URI in Dockerfile
     ports:
       - "5001:5000"
     volumes:

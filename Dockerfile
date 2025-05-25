@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     libjpeg-dev \
     libfreetype6-dev \
     pkg-config \
+    redis-tools \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -26,21 +27,24 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir pybind11 Cython
 RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
 
-# Switch back to root to copy files and set permissions
 USER root
 
 COPY . .
 
-# Create necessary directories and ensure airflow user owns them
 RUN mkdir -p /app/airflow/dags /app/airflow/logs /app/airflow/plugins \
              /app/data/raw /app/data/processed /app/mlruns && \
-    chown -R airflow /app # MODIFIED: Changed airflow:airflow to just airflow
+    chown -R airflow /app
+
+# Create a symbolic link to ensure DAGs are correctly found
+RUN ln -sf /app/airflow/dags/* /opt/airflow/dags/
 
 RUN chmod +x /app/entry_point.sh
 
-ENV PYTHONPATH=/app
 ENV AIRFLOW_HOME=/app/airflow
+ENV PYTHONPATH=/app
 ENV MLFLOW_TRACKING_URI=http://mlflow-server:5000
+ENV ENV=docker 
+
 USER airflow
 
 ENTRYPOINT ["bash", "/app/entry_point.sh"]

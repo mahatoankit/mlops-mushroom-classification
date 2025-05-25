@@ -7,15 +7,37 @@ import os
 import pandas as pd
 import logging
 
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("logs/extract.log"), logging.StreamHandler()],
+# Create logs directory using absolute paths
+log_dir = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
 )
+os.makedirs(log_dir, exist_ok=True)
+
+# Configure logging with safe absolute paths
+log_path = os.path.join(log_dir, "extract.log")
+
+# Only set up file handler if we have write permissions
+try:
+    handlers = [logging.StreamHandler()]
+    if os.access(log_dir, os.W_OK):
+        handlers.append(logging.FileHandler(log_path))
+    else:
+        print(f"Warning: No write access to {log_dir}, using console logging only")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=handlers,
+    )
+except Exception as e:
+    # Fallback to console-only logging
+    print(f"Error setting up file logging: {e}")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler()],
+    )
+
 logger = logging.getLogger(__name__)
 
 
