@@ -1,26 +1,27 @@
+Cython>=0.29.30
+pybind11>=2.11
 # Core ML libraries
 pandas==2.1.4
-numpy==1.24.4
+numpy==1.26.4
 scikit-learn==1.3.2
 xgboost==1.7.6
 joblib==1.3.1
 
 # Visualization
-matplotlib==3.7.1
+matplotlib==3.7.3
 seaborn==0.12.2
 plotly==5.15.0
 
 # Data processing
-pyarrow==12.0.1
-fastparquet==0.8.3
+pyarrow==14.0.2 # UPDATED: To be <15 (for mlflow 2.8.1) and hopefully avoid metadata bug / get a wheel
+fastparquet==2023.10.1
 
-# Airflow
-apache-airflow==2.7.3
+# Airflow (only provider, core is already in base image)
 apache-airflow-providers-postgres==5.7.1
 psycopg2-binary==2.9.9
 
 # MLOps and Monitoring
-mlflow==2.8.1
+mlflow==2.8.1 # Keeping this for now
 great-expectations==0.17.12
 
 # Configuration

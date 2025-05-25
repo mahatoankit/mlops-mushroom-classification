@@ -96,7 +96,7 @@ def save_model(
         if metrics and X_sample is not None:
             try:
                 version = register_and_promote_model(
-                    model, model_name, metrics, promote, X_sample, y_sample
+                    model, model_name, metrics, promote, X_sample, y_sample # type: ignore
                 )
                 logger.info(f"Model {model_name} registered as version {version}")
 

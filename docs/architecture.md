@@ -4,7 +4,7 @@
 
 ```
 +-------------------+    +-----------------------+    +------------------+
-|                   |    |                       |    |                  |
+|                   |
 |   Data Sources    +--->+   ETL Pipeline        +--->+  Model Training  |
 |                   |    |                       |    |                  |
 +-------------------+    +-----------------------+    +------------------+
@@ -78,6 +78,7 @@
 - **Pandas/NumPy**: Data processing
 - **Scikit-learn/XGBoost**: Machine learning
 - **FastAPI**: API framework
+- **Flask**: (Optional) Alternative API framework
 - **Airflow**: Workflow orchestration
 - **MariaDB**: Data storage
 - **Docker**: Containerization
