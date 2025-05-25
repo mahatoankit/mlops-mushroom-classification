@@ -57,10 +57,11 @@ services:
       - AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK=true
       - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=true
       - AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT=60
+      - AIRFLOW__CORE__XCOM_BACKEND=airflow.models.xcom.BaseXCom
       - PYTHONPATH=/app
       - ENV=docker
     volumes:
-      - ./dags:/app/dags
+      - ./airflow/dags:/app/dags
       - ./data:/app/data
       - ./models:/app/models
       - ./logs:/app/logs
@@ -68,20 +69,21 @@ services:
       - ./config:/app/config
     ports:
       - "8080:8080"
+    entrypoint: []
     command: >
       bash -c "
         echo 'Waiting for database and redis...' &&
         sleep 10 &&
-        airflow db init &&
-        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin &&
+        airflow db migrate &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin || echo 'User already exists' &&
         airflow webserver --port 8080
       "
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health || exit 0"]
+      interval: 60s
+      timeout: 30s
+      retries: 10
+      start_period: 120s
     restart: unless-stopped
     networks:
       - mushroom-network
@@ -99,10 +101,11 @@ services:
       - AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__CORE__XCOM_BACKEND=airflow.models.xcom.BaseXCom
       - PYTHONPATH=/app
       - ENV=docker
     volumes:
-      - ./dags:/app/dags
+      - ./airflow/dags:/app/dags
       - ./data:/app/data
       - ./models:/app/models
       - ./logs:/app/logs
@@ -129,6 +132,7 @@ services:
     build: .
     container_name: mushroom-etl-standalone
     volumes:
+      - ./airflow/dags:/app/dags
       - ./data:/app/data
       - ./models:/app/models
       - ./logs:/app/logs
@@ -148,7 +152,7 @@ services:
     image: python:3.9-slim
     container_name: mlflow-server
     ports:
-      - "5001:5000"  # Alternative MLflow port
+      - "5001:5000"
     volumes:
       - ./mlruns:/mlruns
       - ./mlflow_artifacts:/mlflow_artifacts

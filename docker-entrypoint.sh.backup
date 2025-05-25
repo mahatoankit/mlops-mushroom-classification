@@ -1,29 +1,7 @@
 #!/bin/bash
 set -e
 
-# 🐛 DEBUG: Print all arguments received by the script
-echo "🐛 DEBUG: Script called with $# arguments:"
-echo "🐛 DEBUG: All arguments: $*"
-echo "🐛 DEBUG: Arguments array: $@"
-for i in $(seq 1 $#); do
-    eval "arg=\${$i}"
-    echo "🐛 DEBUG: Argument $i: '$arg'"
-done
-echo "🐛 DEBUG: First argument (\$1): '$1'"
-echo "🐛 DEBUG: Second argument (\$2): '$2'"
-echo "🐛 DEBUG: Third argument (\$3): '$3'"
-echo "============================================================"
-
 echo "🐳 Starting Mushroom Classification MLOps Pipeline"
-echo "============================================================"
-
-# Debug: Print all arguments received by the entrypoint script
-echo "🐛 DEBUG: Entrypoint script received ${#} arguments:"
-for i in $(seq 1 $#); do
-    echo "  Arg $i: '${!i}'"
-done
-echo "🐛 DEBUG: All args as string: '$*'"
-echo "🐛 DEBUG: All args as array: '$@'"
 echo "============================================================"
 
 # Detect if running in Docker or on host
@@ -557,7 +535,6 @@ sleep 5
 create_sample_data
 
 # Start services based on command
-echo "🐛 DEBUG: About to enter case statement with first arg: '$1'"
 case "${1:-run-all}" in
     "status")
         check_pipeline_status
@@ -700,49 +677,19 @@ case "${1:-run-all}" in
         run_training
         ;;
         
-    "bash")
-        # Support for bash as a command
-        echo "🐚 Running bash shell..."
-        exec bash "${@:2}"
-        ;;
-        
-    "-c")
-        # Support for using -c option directly
-        echo "🐚 Executing bash command..."
-        exec bash -c "${*:2}"
-        ;;
-        
     *)
-        # Debug: Print what we're checking in the wildcard case
-        echo "🐛 DEBUG: Wildcard case triggered"
-        echo "🐛 DEBUG: \$1 = '$1'"
-        echo "🐛 DEBUG: \$2 = '$2'"
-        echo "🐛 DEBUG: \${*:3} = '${*:3}'"
-        
-        # Check if the first argument is bash with -c
-        if [[ "$1" == "bash" && "$2" == "-c" ]]; then
-            echo "🐚 Executing bash command..."
-            echo "🐛 DEBUG: Command to execute: '${*:3}'"
-            exec bash -c "${*:3}"
-        else
-            echo "🐛 DEBUG: Condition failed - not 'bash -c'"
-            echo "❌ Unknown command: $1"
-            echo "Available commands:"
-            echo "  status          - Check pipeline status"
-            echo "  reset-airflow   - Reset Airflow credentials"
-            echo "  start-airflow   - Start only Airflow"
-            echo "  start-mlflow    - Start only MLflow"
-            echo "  local           - Run with existing run_simple.sh"
-            echo "  run-all         - Start all services"
-            echo "  stop            - Stop all services"
-            echo "  restart         - Restart all services"
-            echo "  docker-help     - Show Docker commands"
-            echo "  bash            - Run bash shell"
-            echo "  bash -c 'cmd'   - Execute a bash command"
-            exit 1
-        fi
+        echo "❌ Unknown command: $1"
+        echo "Available commands:"
+        echo "  status          - Check pipeline status"
+        echo "  reset-airflow   - Reset Airflow credentials"
+        echo "  start-airflow   - Start only Airflow"
+        echo "  start-mlflow    - Start only MLflow"
+        echo "  local           - Run with existing run_simple.sh"
+        echo "  run-all         - Start all services"
+        echo "  stop            - Stop all services"
+        echo "  restart         - Restart all services"
+        echo "  docker-help     - Show Docker commands"
+        exit 1
         ;;
 esac
-
-# End of script
 
