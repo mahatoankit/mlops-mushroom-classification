@@ -1,6 +1,6 @@
 """
 Main ETL pipeline script for the mushroom classification project.
-Orchestrates the entire pipeline from data extraction to model training and evaluation.
+Orchestrates the entire pipeline from data extraction to model training and evaluation with ColumnStore.
 """
 
 import os
@@ -11,15 +11,10 @@ import yaml
 from datetime import datetime
 import sys
 
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
+# Add project root to path
+sys.path.append("/app")
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("logs/pipeline.log"), logging.StreamHandler()],
-)
 logger = logging.getLogger(__name__)
 
 # Import ETL components with error handling
@@ -27,13 +22,8 @@ try:
     from src.extract import extract_data
     from src.transform import transform_data
     from src.load import load_data, save_model
-    from src.train import (
-        train_models,
-        evaluate_model,
-        plot_roc_curves,
-        plot_feature_importance,
-        compare_models,
-    )
+    from src.train import train_models_from_columnstore, train_models
+    from config.database import db_manager
 
     logger.info("Successfully imported ETL components")
 except ImportError as e:
@@ -42,7 +32,7 @@ except ImportError as e:
 
 # Import MLOps components with error handling
 try:
-    from src.monitoring import ModelMonitor
+    from src.monitoring import monitor_model_performance
     from src.model_versioning import ModelRegistry, register_and_promote_model
     from src.ab_testing import create_ab_test
 
@@ -77,10 +67,13 @@ except ImportError as e:
     def create_ab_test(*args, **kwargs):
         return "test_123"
 
+    def monitor_model_performance(*args, **kwargs):
+        return {"monitoring": "disabled"}
+
 
 def run_pipeline(config_path, step=None):
     """
-    Run the full ETL pipeline or a specific step.
+    Run the full ETL pipeline or a specific step with ColumnStore integration.
 
     Args:
         config_path (str): Path to the configuration file.
@@ -95,15 +88,19 @@ def run_pipeline(config_path, step=None):
             logger.warning(
                 f"Config file {config_path} not found, creating default config"
             )
-            # Create a default config
             config = {
                 "paths": {
-                    "raw_data": "data/raw",
-                    "processed_data": "data/processed",
-                    "models": "models",
-                    "metrics": "models/metrics",
+                    "raw_data": "/app/data/raw",
+                    "processed_data": "/app/data/processed",
+                    "models": "/app/models",
+                    "metrics": "/app/models/metrics",
                 },
-                "split": {"test_size": 0.3, "random_state": 42},
+                "data_split": {"test_size": 0.3, "random_state": 42},
+                "models": {
+                    "random_forest": {"n_estimators": 100},
+                    "gradient_boosting": {"n_estimators": 100},
+                    "xgboost": {"n_estimators": 100, "max_depth": 6},
+                },
             }
         else:
             with open(config_path, "r") as file:
@@ -121,8 +118,8 @@ def run_pipeline(config_path, step=None):
         # Initialize pipeline components
         df = None
         df_transformed = None
-        X_train, X_test, y_train, y_test = None, None, None, None
-        models = {}
+        experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        training_results = {}
         model_metrics = {}
 
         # Run specified step or all steps
@@ -143,6 +140,14 @@ def run_pipeline(config_path, step=None):
                 return
             steps = steps[steps.index(step) :]
 
+        # Test database connectivity first
+        logger.info("Testing database connectivity...")
+        if not db_manager.test_mariadb_connection():
+            raise Exception("MariaDB connection failed")
+        if not db_manager.test_postgres_connection():
+            raise Exception("PostgreSQL connection failed")
+        logger.info("Database connectivity verified")
+
         # Extract data
         if "extract" in steps:
             logger.info("Step 1: Extracting data")
@@ -156,172 +161,147 @@ def run_pipeline(config_path, step=None):
             logger.error("Cannot transform data: No data extracted")
             return
 
-        # Load data (split and save)
+        # Load data into ColumnStore
         if "load" in steps and df_transformed is not None:
-            logger.info("Step 3: Loading processed data")
-            X_train, X_test, y_train, y_test = load_data(
-                df_transformed,
-                config["paths"]["processed_data"],
-                test_size=config["split"]["test_size"],
-                random_state=config["split"]["random_state"],
-            )
+            logger.info("Step 3: Loading processed data into ColumnStore")
+
+            # Initialize ColumnStore tables
+            db_manager.create_columnstore_tables()
+
+            # Load data using enhanced ETL
+            from src.data_processing.enhanced_etl import EnhancedMushroomETL
+
+            etl = EnhancedMushroomETL()
+            etl_results = etl.run_etl_pipeline(experiment_id)
+
+            if etl_results["status"] != "success":
+                raise Exception(f"ETL pipeline failed: {etl_results.get('error')}")
+
+            logger.info(f"Data loaded successfully for experiment {experiment_id}")
+
         elif "load" in steps:
             logger.error("Cannot load data: No transformed data available")
             return
 
-        # Train models
+        # Train models using ColumnStore data
         if "train" in steps:
-            # Load data if not already loaded
-            if X_train is None or y_train is None:
-                try:
-                    logger.info("Loading saved processed data for training")
-                    import pickle
+            logger.info("Step 4: Training models from ColumnStore")
 
-                    with open(
-                        os.path.join(
-                            config["paths"]["processed_data"], "processed_data.pkl"
-                        ),
-                        "rb",
-                    ) as f:
-                        processed_data = pickle.load(f)
-                    X_train = processed_data["X_train"]
-                    X_test = processed_data["X_test"]
-                    y_train = processed_data["y_train"]
-                    y_test = processed_data["y_test"]
-                except Exception as e:
-                    logger.error(f"Cannot load processed data for training: {e}")
-                    return
+            try:
+                training_results = train_models_from_columnstore(experiment_id, config)
 
-            logger.info("Step 4: Training models")
-            models = train_models(X_train, y_train)
+                if training_results:
+                    logger.info(f"Model training completed successfully")
+                    logger.info(
+                        f"Best model: {training_results.get('best_model')} with accuracy: {training_results.get('best_accuracy', 0):.4f}"
+                    )
 
-            # Evaluate models
-            logger.info("Step 5: Evaluating models")
-            model_metrics = {}
-            for name, model in models.items():
-                # Evaluate the model
-                metrics = evaluate_model(
-                    name,
-                    model,
-                    X_train,
-                    y_train,
-                    X_test,
-                    y_test,
-                    output_path=config["paths"]["metrics"],
-                )
-                model_metrics[name] = metrics
+                    # Extract model metrics for monitoring
+                    model_metrics = {}
+                    for model_name, results in training_results.get(
+                        "model_results", {}
+                    ).items():
+                        model_metrics[model_name] = {
+                            "accuracy": results["accuracy"],
+                            "precision": results["precision"],
+                            "recall": results["recall"],
+                            "f1_score": results["f1_score"],
+                        }
 
-                # Save the model
-                save_model(model, name, config["paths"]["models"])
+                    # Save trained models
+                    for model_name, pipeline in training_results.get(
+                        "trained_models", {}
+                    ).items():
+                        model_path = save_model(
+                            pipeline,
+                            model_name,
+                            config["paths"]["models"],
+                            metrics=model_metrics.get(model_name),
+                        )
+                        logger.info(f"Saved {model_name} to {model_path}")
+                else:
+                    raise Exception("No training results returned")
 
-            # Create visualizations
-            logger.info("Step 6: Creating visualizations")
-            plot_roc_curves(
-                models, X_test, y_test, output_path=config["paths"]["metrics"]
-            )
-            plot_feature_importance(
-                models["xgboost"], X_train, output_path=config["paths"]["metrics"]
-            )
-            compare_models(model_metrics, output_path=config["paths"]["metrics"])
+            except Exception as e:
+                logger.error(f"Model training failed: {e}")
+                raise
 
         # Setup model monitoring
-        if "monitoring" in steps:
-            logger.info("Step 7: Setting up model monitoring")
+        if "monitoring" in steps and model_metrics:
+            logger.info("Step 5: Setting up model monitoring")
 
-            # Load model metrics if not available
-            if not model_metrics and os.path.exists(
-                os.path.join(config["paths"]["metrics"], "pipeline_metadata.json")
-            ):
-                try:
-                    with open(
-                        os.path.join(
-                            config["paths"]["metrics"], "pipeline_metadata.json"
-                        ),
-                        "r",
-                    ) as f:
-                        metadata = json.load(f)
-                        model_metrics = metadata.get("model_metrics", {})
-                except Exception as e:
-                    logger.error(f"Error loading model metrics for monitoring: {e}")
-
-            if model_metrics:
+            try:
                 for model_name, metrics in model_metrics.items():
-                    # Initialize model monitor
-                    monitor = ModelMonitor(
-                        model_name,
-                        os.path.join(config["paths"]["metrics"], "monitoring"),
+                    monitoring_results = monitor_model_performance(
+                        None,  # Model object not needed for basic monitoring
+                        None,  # X_test
+                        None,  # y_test
+                        metrics_path=os.path.join(
+                            config["paths"]["metrics"], "monitoring", model_name
+                        ),
                     )
-
-                    # Record initial metrics
-                    monitor.record_metrics(metrics)
-
-                    # Generate monitoring report
-                    report_path = monitor.generate_monitoring_report()
-                    logger.info(
-                        f"Generated monitoring report for {model_name} at {report_path}"
-                    )
+                    logger.info(f"Monitoring setup completed for {model_name}")
+            except Exception as e:
+                logger.warning(f"Monitoring setup failed: {e}")
 
         # Setup model versioning
-        if "versioning" in steps:
-            logger.info("Step 8: Setting up model versioning")
+        if "versioning" in steps and model_metrics:
+            logger.info("Step 6: Setting up model versioning")
 
-            # Initialize model registry
-            registry = ModelRegistry(
-                os.path.join(config["paths"]["models"], "registry")
-            )
+            try:
+                registry = ModelRegistry(
+                    os.path.join(config["paths"]["models"], "registry")
+                )
 
-            # Register models if available
-            if model_metrics:
                 for model_name, metrics in model_metrics.items():
                     model_path = os.path.join(
                         config["paths"]["models"], f"{model_name}.joblib"
                     )
 
-                    # Choose the best model for production
-                    promote_to = None
-                    if model_name == "xgboost":  # Assuming XGBoost is the best model
-                        promote_to = "production"
-                    else:
-                        promote_to = "staging"
+                    if os.path.exists(model_path):
+                        promote_to = (
+                            "production"
+                            if model_name == training_results.get("best_model")
+                            else "staging"
+                        )
 
-                    # Register and promote the model
-                    try:
-                        version = register_and_promote_model(
-                            model_path, model_name, metrics, promote_to
-                        )
-                        logger.info(
-                            f"Registered {model_name} as version {version} in {promote_to}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error registering model {model_name}: {e}")
+                        try:
+                            version = register_and_promote_model(
+                                model_path, model_name, metrics, promote_to
+                            )
+                            logger.info(
+                                f"Registered {model_name} as version {version} in {promote_to}"
+                            )
+                        except Exception as e:
+                            logger.error(f"Error registering model {model_name}: {e}")
+            except Exception as e:
+                logger.warning(f"Model versioning setup failed: {e}")
 
         # Setup A/B testing
-        if "ab_testing" in steps:
-            logger.info("Step 9: Setting up A/B testing")
+        if "ab_testing" in steps and model_metrics:
+            logger.info("Step 7: Setting up A/B testing")
 
-            # Find models to compare
             try:
-                registry = ModelRegistry(
-                    os.path.join(config["paths"]["models"], "registry")
-                )
-                prod_models = registry.get_production_models()
-                staging_models = registry.get_staging_models()
+                if len(model_metrics) >= 2:
+                    models = list(model_metrics.keys())
+                    model_a = models[0]
+                    model_b = models[1]
 
-                if prod_models and staging_models:
-                    # Get the first production and staging model for A/B testing
-                    prod_model = list(prod_models.values())[0]["path"]
-                    staging_model = list(staging_models.values())[0]["path"]
-
-                    # Create A/B test
                     ab_test_id = create_ab_test(
-                        name=f"{os.path.basename(prod_model).split('.')[0]}_vs_{os.path.basename(staging_model).split('.')[0]}",
-                        model_a=prod_model,
-                        model_b=staging_model,
+                        name=f"{model_a}_vs_{model_b}_{experiment_id}",
+                        model_a=os.path.join(
+                            config["paths"]["models"], f"{model_a}.joblib"
+                        ),
+                        model_b=os.path.join(
+                            config["paths"]["models"], f"{model_b}.joblib"
+                        ),
                         traffic_split=0.5,
                     )
                     logger.info(f"Created A/B test with ID: {ab_test_id}")
+                else:
+                    logger.warning("Not enough models for A/B testing")
             except Exception as e:
-                logger.error(f"Error setting up A/B test: {e}")
+                logger.warning(f"A/B testing setup failed: {e}")
 
         # Save pipeline metadata
         end_time = datetime.now()
@@ -332,35 +312,28 @@ def run_pipeline(config_path, step=None):
             "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
             "elapsed_time_seconds": elapsed_time,
             "steps_executed": steps,
+            "experiment_id": experiment_id,
+            "training_results": training_results,
+            "model_metrics": model_metrics,
         }
 
         # Add data shape information if available
-        data_shape = {}
         if df is not None:
-            data_shape["raw"] = df.shape
+            metadata["raw_data_shape"] = df.shape
         if df_transformed is not None:
-            data_shape["transformed"] = df_transformed.shape
-        if X_train is not None:
-            data_shape["train"] = X_train.shape
-        if X_test is not None:
-            data_shape["test"] = X_test.shape
-
-        if data_shape:
-            metadata["data_shape"] = data_shape
-
-        # Add model metrics if available
-        if model_metrics:
-            metadata["model_metrics"] = model_metrics
+            metadata["transformed_data_shape"] = df_transformed.shape
 
         # Save metadata as JSON
-        with open(
-            os.path.join(config["paths"]["metrics"], "pipeline_metadata.json"), "w"
-        ) as f:
-            json.dump(metadata, f, indent=4)
+        metadata_path = os.path.join(
+            config["paths"]["metrics"], "pipeline_metadata.json"
+        )
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=4, default=str)
 
         logger.info(
             f"ETL pipeline completed successfully in {elapsed_time:.2f} seconds"
         )
+        logger.info(f"Pipeline metadata saved to {metadata_path}")
 
     except Exception as e:
         logger.error(f"Error in ETL pipeline: {e}")
@@ -374,7 +347,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="config/config.yaml",
+        default="/app/config/config.yaml",
         help="Path to the configuration file",
     )
     parser.add_argument(

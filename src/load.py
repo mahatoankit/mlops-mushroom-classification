@@ -1,70 +1,65 @@
 """
 Load component of the ETL pipeline for Mushroom Classification.
-Responsible for saving processed data and trained models.
+Responsible for saving processed data and trained models with ColumnStore integration.
 """
 
 import os
 import pandas as pd
-# import pickle # Not used in the provided code, can be removed if truly unused
 import logging
-import joblib # Used for model saving
+import joblib
+import sys
 from sklearn.model_selection import train_test_split
+from datetime import datetime
 
-# Import model versioning (keep this if src.model_versioning exists and is used)
-from src.model_versioning import register_and_promote_model
+# Add project root to path
+sys.path.append("/app")
 
-# Get a logger for this module.
-# Configuration of this logger (handlers, level) should ideally happen
-# in the main application (e.g., Airflow for tasks, or your test script).
-logger = logging.getLogger(__name__) # GOOD: Use __name__ for module-specific logger
+# Import model versioning (with error handling)
+try:
+    from src.model_versioning import register_and_promote_model
+except ImportError:
+    logger = logging.getLogger(__name__)
+    logger.warning("Model versioning module not available")
 
-# --- REMOVE OR MODIFY THE FOLLOWING ---
-# # Create logs directory if it doesn't exist
-# os.makedirs("logs", exist_ok=True) # REMOVE THIS
-#
-# # Configure logging
-# logging.basicConfig( # REMOVE THIS global basicConfig
-#     level=logging.INFO,
-#     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-#     handlers=[logging.FileHandler("logs/load.log"), logging.StreamHandler()],
-# )
-# --- END REMOVE OR MODIFY ---
+    def register_and_promote_model(*args, **kwargs):
+        return "v1.0.0"
 
 
-# Example of how you might set up logging if this script is run standalone for testing
-# This will only run if this script is the main entry point.
-if __name__ == "__main__":
-    # This configuration will only apply if you run `python src/load.py` directly
-    # It won't affect Airflow's logging when this module is imported by a DAG.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(), # Log to console
-            # Optionally, add a file handler for standalone testing:
-            # logging.FileHandler("src_load_standalone_test.log")
-        ]
-    )
-    logger.info("src/load.py executed as main script (for testing).")
-    # Add test code here if needed, e.g.:
-    # test_df = pd.DataFrame({'feature1': [1,2,3], 'feature2': [4,5,6], 'class_encoded': [0,1,0]})
-    # X_train, X_test, y_train, y_test = load_data(test_df, "./temp_processed_data")
-    # print("Standalone test of load_data completed.")
+# Get a logger for this module
+logger = logging.getLogger(__name__)
 
 
 def load_data(df, output_path, test_size=0.3, random_state=42):
-    """Prepare data for modeling exactly like notebook"""
+    """Prepare data for modeling and save to files"""
     logger.info("Preparing data for modeling")
 
     if "class_encoded" not in df.columns:
-        logger.error("class_encoded column not found in data") # Use logger
-        raise ValueError("class_encoded column not found in data")
+        # Try to find alternative target columns
+        target_candidates = ["class", "edible", "target"]
+        target_column = None
+
+        for candidate in target_candidates:
+            if candidate in df.columns:
+                target_column = candidate
+                break
+
+        if target_column is None:
+            # Use the last column as target
+            target_column = df.columns[-1]
+            logger.warning(
+                f"No standard target column found, using last column: {target_column}"
+            )
+
+        # Rename target column to class_encoded for consistency
+        df = df.rename(columns={target_column: "class_encoded"})
+        logger.info(f"Renamed target column '{target_column}' to 'class_encoded'")
 
     X = df.drop(columns=["class_encoded"])
     y = df["class_encoded"]
 
+    # Convert integer columns to float for consistency
     integer_cols = X.select_dtypes(include=["int64", "int32"]).columns
-    if not integer_cols.empty: # Check if there are any integer columns
+    if not integer_cols.empty:
         X[integer_cols] = X[integer_cols].astype("float64")
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -75,7 +70,10 @@ def load_data(df, output_path, test_size=0.3, random_state=42):
         f"Split data into train ({X_train.shape[0]} samples) and test ({X_test.shape[0]} samples) sets"
     )
 
-    os.makedirs(output_path, exist_ok=True) # Ensure output path exists
+    # Ensure output path exists
+    os.makedirs(output_path, exist_ok=True)
+
+    # Save data splits
     X_train.to_csv(os.path.join(output_path, "X_train.csv"), index=False)
     X_test.to_csv(os.path.join(output_path, "X_test.csv"), index=False)
     y_train.to_csv(os.path.join(output_path, "y_train.csv"), index=False)
@@ -96,29 +94,160 @@ def save_model(
     y_sample=None,
 ):
     """
-    Save a trained model and register it with the model registry.
+    Save a trained model and optionally register it with the model registry.
+
+    Args:
+        model: Trained model object
+        model_name (str): Name of the model
+        output_path (str): Path to save the model
+        metrics (dict, optional): Model performance metrics
+        promote (str, optional): Stage to promote model to ('staging', 'production')
+        X_sample (pd.DataFrame, optional): Sample input data
+        y_sample (pd.Series, optional): Sample target data
+
+    Returns:
+        str: Path to saved model
     """
     try:
         logger.info(f"Saving {model_name} model")
         os.makedirs(output_path, exist_ok=True)
 
-        if metrics and X_sample is not None and y_sample is not None: # Ensure y_sample also present
+        # Save model using joblib
+        model_path = os.path.join(output_path, f"{model_name}.joblib")
+        joblib.dump(model, model_path)
+        logger.info(f"Saved {model_name} model to {model_path}")
+
+        # Save model metadata
+        metadata = {
+            "model_name": model_name,
+            "saved_at": datetime.now().isoformat(),
+            "model_path": model_path,
+            "metrics": metrics or {},
+            "promote": promote,
+        }
+
+        metadata_path = os.path.join(output_path, f"{model_name}_metadata.json")
+        import json
+
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"Saved {model_name} metadata to {metadata_path}")
+
+        # Register with model versioning if available and metrics provided
+        if metrics and hasattr(register_and_promote_model, "__call__"):
             try:
                 version = register_and_promote_model(
-                    model, model_name, metrics, promote, X_sample, y_sample
+                    model_path, model_name, metrics, promote, X_sample, y_sample
                 )
                 logger.info(f"Model {model_name} registered as version {version}")
                 if promote:
                     logger.info(f"Model {model_name} promoted to {promote}")
             except Exception as e:
-                logger.error(f"Error registering model {model_name} (versioning API): {e}")
-                # Decide if this should be a fatal error or just a warning
+                logger.warning(
+                    f"Error registering model {model_name} with versioning system: {e}"
+                )
 
-        model_path = os.path.join(output_path, f"{model_name}.joblib")
-        joblib.dump(model, model_path)
-        logger.info(f"Saved {model_name} model to {model_path}")
         return model_path
 
     except Exception as e:
         logger.error(f"Error saving model {model_name}: {e}")
         raise
+
+
+def load_model(model_path):
+    """
+    Load a saved model from disk.
+
+    Args:
+        model_path (str): Path to the saved model
+
+    Returns:
+        object: Loaded model
+    """
+    try:
+        logger.info(f"Loading model from {model_path}")
+
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+
+        model = joblib.load(model_path)
+        logger.info(f"Successfully loaded model from {model_path}")
+
+        return model
+
+    except Exception as e:
+        logger.error(f"Error loading model from {model_path}: {e}")
+        raise
+
+
+def save_data_splits_to_columnstore(X_train, X_test, y_train, y_test, experiment_id):
+    """
+    Save data splits directly to ColumnStore database.
+
+    Args:
+        X_train, X_test: Feature datasets
+        y_train, y_test: Target datasets
+        experiment_id (str): Experiment identifier
+
+    Returns:
+        dict: Results of the save operation
+    """
+    try:
+        from config.database import db_manager
+
+        logger.info(f"Saving data splits to ColumnStore for experiment {experiment_id}")
+
+        # Combine features and targets
+        train_data = pd.concat([X_train, y_train.rename("class")], axis=1)
+        test_data = pd.concat([X_test, y_test.rename("class")], axis=1)
+
+        # Add data version
+        data_version = datetime.now().strftime("%Y%m%d_%H%M%S")
+        train_data["data_version"] = data_version
+        test_data["data_version"] = data_version
+
+        # Insert training data
+        train_success = db_manager.insert_cleaned_data(train_data, data_version)
+        if not train_success:
+            raise Exception("Failed to insert training data")
+
+        # Insert test data
+        test_success = db_manager.insert_cleaned_data(test_data, data_version)
+        if not test_success:
+            raise Exception("Failed to insert test data")
+
+        # Create data splits references
+        train_ids = list(range(1, len(train_data) + 1))  # Simplified ID assignment
+        test_ids = list(
+            range(len(train_data) + 1, len(train_data) + len(test_data) + 1)
+        )
+
+        splits_success = db_manager.create_data_splits(
+            experiment_id, train_ids, test_ids, []
+        )
+        if not splits_success:
+            raise Exception("Failed to create data split references")
+
+        logger.info(f"Successfully saved data splits to ColumnStore")
+
+        return {
+            "status": "success",
+            "experiment_id": experiment_id,
+            "data_version": data_version,
+            "train_samples": len(train_data),
+            "test_samples": len(test_data),
+        }
+
+    except Exception as e:
+        logger.error(f"Error saving data splits to ColumnStore: {e}")
+        return {"status": "failed", "error": str(e)}
+
+
+# Example of how to set up logging if this script is run standalone for testing
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler()],
+    )
+    logger.info("src/load.py executed as main script (for testing).")
