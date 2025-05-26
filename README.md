@@ -1,194 +1,150 @@
-# Mushroom Classification ETL Pipeline
+# Mushroom Classification MLOps Project: Technical Documentation
 
-This project implements a robust ETL (Extract, Transform, Load) pipeline for mushroom classification using machine learning. The pipeline includes data preprocessing, model training, evaluation, and serving predictions through an API.
+## Project Overview
 
-## Project Structure
+This project implements a complete MLOps pipeline for mushroom classification. It demonstrates the end-to-end machine learning lifecycle from data extraction, transformation, and loading (ETL) to model training, evaluation, deployment, and monitoring using industry-standard tools.
+
+## System Architecture
+
+The project employs a containerized architecture using Docker and Docker Compose to manage various services:
+
+1. **Airflow**: Workflow orchestration
+2. **MLflow**: Experiment tracking and model registry
+3. **Custom Python services**: Data processing and model training
+
+## Directory Structure
 
 ```
-├── config/                  # Configuration files
-│   └── config.yaml          # Main configuration file
-├── dags/                    # Airflow DAGs
-│   └── mushroom_etl_dag.py  # DAG for running the ETL pipeline
-├── data/                    # Data files
-│   ├── model_input/         # Input data for models
-│   ├── processed/           # Processed data
-│   ├── raw/                 # Raw data files
-│   │   ├── secondary_data.csv
-│   └── validation/          # Validation data
-├── docker/                  # Docker configuration
-│   └── docker-compose.yml   # Docker Compose file
-├── logs/                    # Log files
-├── models/                  # Trained models
-│   └── metrics/             # Model evaluation metrics
-│       └── monitoring/      # Model monitoring results
-├── notebooks/               # Jupyter notebooks
-│   └── Mushroom_Classifier_XGBoost_FullEDA.ipynb  # Original analysis notebook
-├── src/                     # Source code
-│   ├── extract.py           # Data extraction module
-│   ├── load.py              # Data loading module
-│   ├── monitoring.py        # Model monitoring module
-│   ├── pipeline.py          # Main pipeline script
-│   ├── train.py             # Model training module
-│   ├── transform.py         # Data transformation module
-│   └── model_serving/       # Model serving components
-│       ├── api.py           # FastAPI server
-│       ├── database.py      # Database utilities
-│       └── model_loader.py  # Model loading utilities
-└── tests/                   # Unit tests
-    ├── test_api.py          # API tests
-    ├── test_extract.py      # Extract component tests
-    ├── test_load.py         # Load component tests
-    └── test_transform.py    # Transform component tests
+new-mushroom/
+├── airflow/              # Airflow configuration and DAG definitions
+│   ├── dags/             # Workflow definitions
+│   ├── logs/             # Airflow logs
+│   └── plugins/          # Airflow plugins
+├── data/                 # Data storage
+│   ├── raw/              # Raw, unprocessed data
+│   ├── processed/        # Cleaned and processed data
+│   └── temp/             # Temporary data files
+├── models/               # Trained models
+│   └── metrics/          # Model evaluation metrics
+├── mlruns/               # MLflow experiment tracking database
+├── mlflow_artifacts/     # MLflow model artifacts
+├── config/               # Configuration files
+├── src/                  # Source code
+└── fix_all.sh            # Utility script to fix permissions and configurations
 ```
 
-## Getting Started
+## Key Components
 
-### Prerequisites
+### 1. Airflow
 
-- Python 3.8+
-- Docker and Docker Compose (for database components)
-- Required Python packages (listed in `requirements.txt`)
+**Purpose**: Apache Airflow handles workflow orchestration, scheduling, and monitoring of the machine learning pipeline.
 
-### Installation
+**Key Features**:
 
-1. Clone the repository
-2. Install the required packages:
+- DAG (Directed Acyclic Graph) definitions for workflow management
+- Task scheduling and dependency management
+- Web UI for monitoring execution status
+- Integration with external systems
 
-```bash
-pip install -r requirements.txt
-```
+**Configuration**:
 
-3. Start the database services:
+- Custom dags_folder path: `/app/airflow/dags`
+- Authentication setup based on Airflow version
+- Disabled example DAGs
+- Fast DAG directory scanning (30-second intervals)
 
-```bash
-cd docker && docker-compose up -d
-```
+### 2. MLflow
 
-### Running the ETL Pipeline
+**Purpose**: MLflow provides experiment tracking, model versioning, and model registry capabilities.
 
-To run the ETL pipeline manually:
+**Key Features**:
 
-```bash
-./run_etl.sh
-```
+- Experiment tracking for hyperparameter tuning
+- Metric logging and visualization
+- Model versioning and management
+- Model serving capabilities
 
-This will:
+**Configuration**:
 
-1. Extract data from the raw data source
-2. Transform the data (clean, encode, impute missing values)
-3. Load the processed data to the appropriate files
-4. Train multiple models (Logistic Regression, Decision Tree, XGBoost)
-5. Evaluate the models and generate metrics
-6. Save the models for future use
+- Artifact storage in `./mlflow_artifacts`
+- Database storage in `./mlruns`
+- Web UI accessible on port 5000
 
-### Starting the API Server
+### 3. Data Pipeline
 
-To start the FastAPI server for model serving:
+**Purpose**: Extract, transform, and load data for model training.
 
-```bash
-./run_api.sh [port]
-```
+**Components**:
 
-By default, the API will be available at http://localhost:8000. You can also specify a custom port.
+- Data extraction from source
+- Data cleaning and preprocessing
+- Feature engineering
+- Dataset splitting and preparation for model training
 
-### API Endpoints
+### 4. Model Training & Evaluation
 
-#### Core Endpoints
+**Purpose**: Train machine learning models to classify mushrooms and evaluate their performance.
 
-- `GET /` - API information
-- `POST /predict` - Make a prediction
-- `GET /health` - Health check
+**Components**:
 
-#### A/B Testing Endpoints
+- Model selection and hyperparameter tuning
+- Cross-validation
+- Performance metrics calculation
+- Model comparison and selection
 
-- `GET /ab-tests` - List all A/B tests
-- `POST /ab-tests` - Create a new A/B test
-- `GET /ab-tests/{test_id}` - Get details about a specific test
-- `POST /ab-tests/{test_id}/conclude` - Conclude a test and select winner
+### 5. Docker Infrastructure
 
-### Using the API with Airflow
+**Purpose**: Containerize all components for consistent development and deployment.
 
-The ETL pipeline can also be run as an Airflow DAG. Configure Airflow to look at the `dags/` directory and the DAG will be available in the Airflow UI.
+**Configuration**:
 
-## Database Integration
+- Docker Compose for multi-container orchestration
+- Volume mounts for persistent storage
+- Port mapping for service access
+- User permissions management (UID 50000 for Airflow)
 
-The project includes integration with MariaDB for both OLTP and OLAP operations:
+## Workflow Execution
 
-- **OLTP Database (Port 3307)**: Stores transaction data like prediction requests and results
-- **OLAP Database (Port 3308)**: Stores analytical data for reporting and analysis
+The typical workflow in this MLOps pipeline follows these steps:
 
-You can access the databases using the Adminer web interface at http://localhost:8081.
+1. **Data Ingestion**: Raw mushroom data is loaded into the `data/raw` directory
+2. **Data Processing**: Airflow DAGs trigger data cleaning and transformation tasks
+3. **Model Training**: Multiple models are trained with different parameters
+4. **Model Evaluation**: Models are evaluated and compared using predefined metrics
+5. **Model Registration**: The best model is registered in the MLflow registry
+6. **Deployment**: The selected model is prepared for deployment
 
-## Model Evaluation
+## Operational Information
 
-The pipeline evaluates models using several metrics:
+### Access Points
 
-- Accuracy
-- Precision
-- Recall
-- F1 Score
-- Matthews Correlation Coefficient (MCC)
-- ROC Curves and AUC
+- Airflow UI: http://localhost:8080
+- MLflow UI: http://localhost:5000
 
-Visualizations are saved in the `models/metrics/` directory.
+### Maintenance Tasks
 
-## Model Monitoring
+The `fix_all.sh` script handles common maintenance tasks:
 
-The pipeline includes a comprehensive model monitoring system that:
+- Setting appropriate permissions for directories
+- Creating required directory structure
+- Fixing Airflow configuration issues
+- Creating test DAGs to verify functionality
+- Managing Docker container lifecycle
 
-- Tracks model performance over time
-- Detects data drift using Kolmogorov-Smirnov tests
-- Generates performance visualization and trend charts
-- Creates HTML reports for easy interpretation
-- Provides alerting capabilities for performance degradation
+### Permission Structure
 
-Monitoring metrics and reports are saved in the `models/metrics/monitoring/` directory.
+- Airflow directories: UID 50000, permissions 775
+- MLflow directories: UID 0 (root), permissions 777
+- Data and model directories: permissions 775
 
-## A/B Testing
+## Troubleshooting
 
-The pipeline includes an A/B testing system that allows you to:
+Common issues and their solutions:
 
-- Compare the performance of different model versions in production
-- Allocate traffic between two competing models
-- Collect real-world performance metrics
-- Perform statistical significance tests
-- Automatically select the winning model based on performance
+- DAGs not appearing: Check scheduler logs with `docker compose logs airflow-scheduler`
+- Permission problems: Run the fix_all.sh script to reset permissions
+- Connection issues: Ensure all containers are running with `docker compose ps`
 
-The A/B testing system is integrated with the API and provides endpoints for managing tests.
+## Conclusion
 
-### Creating an A/B Test
-
-To create a new A/B test:
-
-```bash
-curl -X POST "http://localhost:8000/ab-tests?name=xgboost_comparison&model_a=models/xgboost.joblib&model_b=models/registry/xgboost/v2/xgboost.joblib&traffic_split=0.5"
-```
-
-### Using an A/B Test in Predictions
-
-To make predictions using an A/B test:
-
-```bash
-curl -X POST "http://localhost:8000/predict?ab_test=xgboost_comparison" -H "Content-Type: application/json" -d '{...}'
-```
-
-The API will automatically route the request to either model A or B based on the traffic split configuration.
-
-## Testing
-
-Comprehensive unit tests are included for all pipeline components:
-
-- Data extraction tests
-- Data transformation tests
-- Model loading tests
-- API endpoint tests
-
-Run tests using the provided test script:
-
-```bash
-./run_tests.sh
-```
-
-## Acknowledgements
-
-This project was developed as part of the MLOps curriculum and is based on the original mushroom classification notebook.
+This MLOps project demonstrates a comprehensive approach to machine learning operations, employing best practices for automation, reproducibility, and scalability. The combination of Airflow for workflow orchestration and MLflow for experiment tracking creates a robust platform for developing and deploying machine learning models.

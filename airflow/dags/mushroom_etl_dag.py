@@ -8,10 +8,18 @@ import json
 import pandas as pd
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator
 import warnings
 
 warnings.filterwarnings("ignore")
+
+# Print environment info for debugging
+print("🔍 DAG LOADING - Environment Information")
+print(f"Current working directory: {os.getcwd()}")
+print(f"User running process: {os.getuid()}:{os.getgid()}")
+print(f"AIRFLOW_HOME: {os.environ.get('AIRFLOW_HOME', 'Not set')}")
+print(f"MLFLOW_TRACKING_URI: {os.environ.get('MLFLOW_TRACKING_URI', 'Not set')}")
+print(f"DAG file location: {__file__}")
 
 # Environment-aware configuration
 PROJECT_ROOT = (
@@ -28,6 +36,7 @@ PATHS = {
     "models": f"{PROJECT_ROOT}/models",
     "metrics": f"{PROJECT_ROOT}/models/metrics",
     "temp": f"{PROJECT_ROOT}/data/temp",
+    "mlruns": f"{PROJECT_ROOT}/mlruns",  # Add MLflow runs directory
 }
 
 # Ensure critical directories exist
@@ -39,18 +48,18 @@ try:
     import sys
 
     sys.path.insert(0, PROJECT_ROOT)
-    
+
     # Temporarily modify any logging configuration in imported modules
     import logging
-    
+
     # Configure root logger to prevent permission errors
     os.makedirs(f"{PROJECT_ROOT}/logs", exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler()]  # Only use stream handler for now
+        handlers=[logging.StreamHandler()],  # Only use stream handler for now
     )
-    
+
     # Now import the modules
     from src.extract import extract_data
     from src.transform import transform_data
@@ -144,6 +153,17 @@ def handle_task_error(task_name, error):
     raise
 
 
+# Create a config dictionary for train_models function
+DEFAULT_CONFIG = {
+    "data_split": {"test_size": 0.3, "random_state": 42},
+    "models": {
+        "random_forest": {"n_estimators": 100},
+        "gradient_boosting": {"n_estimators": 100},
+        "xgboost": {"n_estimators": 100, "max_depth": 6},
+    },
+}
+
+
 # DAG Tasks
 def task_extract(**context):
     try:
@@ -192,15 +212,37 @@ def task_train(**context):
         X_train = load_temp_data(data_paths["X_train"])
         y_train = load_temp_data(data_paths["y_train"])
 
-        models = train_models(X_train, y_train)
+        # Get the transformed dataframe to pass to train_models
+        transform_result = ti.xcom_pull(task_ids="transform")
+        df_transformed = load_temp_data(transform_result["path"])
 
-        # Save models
-        model_paths = {}
-        for name, model in models.items():
-            save_model(model, name, PATHS["models"])
-            model_paths[name] = f"{PATHS['models']}/{name}.joblib"
+        # Initialize models dictionary
+        models = {}
 
-        return {**data_paths, "models": model_paths}
+        # Get MLflow tracking URI from environment (preferring what's set in the container)
+        mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI")
+        if mlflow_uri:
+            print(f"Using MLFLOW_TRACKING_URI from environment: {mlflow_uri}")
+        else:
+            mlflow_uri = f"file://{PROJECT_ROOT}/mlruns"
+            print(f"Setting MLFLOW_TRACKING_URI to default: {mlflow_uri}")
+            os.environ["MLFLOW_TRACKING_URI"] = mlflow_uri
+
+        # Import mlflow and explicitly set tracking URI
+        try:
+            import mlflow
+
+            mlflow.set_tracking_uri(mlflow_uri)
+            print(
+                f"Successfully set MLflow tracking URI to: {mlflow.get_tracking_uri()}"
+            )
+        except ImportError:
+            print("MLflow not available, continuing without tracking")
+        except Exception as e:
+            print(f"Error setting MLflow tracking URI: {e}")
+
+        # Rest of the training code
+        # ...existing code...
     except Exception as e:
         handle_task_error("train", e)
 
@@ -266,6 +308,90 @@ def task_visualize(**context):
         handle_task_error("visualize", e)
 
 
+# Add MLflow diagnostics task
+def task_check_mlflow(**context):
+    """Task to check MLflow connectivity and status"""
+    try:
+        print("🔍 Checking MLflow configuration and connectivity")
+        print(f"Current directory: {os.getcwd()}")
+        print(f"PROJECT_ROOT: {PROJECT_ROOT}")
+
+        # Check environment variables
+        mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "Not set")
+        print(f"MLFLOW_TRACKING_URI environment variable: {mlflow_uri}")
+
+        # Check MLflow directory permissions
+        if os.path.exists(PATHS["mlruns"]):
+            print(f"MLflow directory exists: {PATHS['mlruns']}")
+            print(f"Permissions: {oct(os.stat(PATHS['mlruns']).st_mode)[-3:]}")
+            print(
+                f"Owner: {os.stat(PATHS['mlruns']).st_uid}:{os.stat(PATHS['mlruns']).st_gid}"
+            )
+
+            # Test file creation in MLflow directory
+            test_file = f"{PATHS['mlruns']}/.test_write"
+            try:
+                with open(test_file, "w") as f:
+                    f.write("test")
+                print(f"✅ Successfully wrote test file to {test_file}")
+                os.remove(test_file)
+                print(f"✅ Successfully removed test file")
+            except Exception as e:
+                print(f"❌ Failed to write to MLflow directory: {e}")
+        else:
+            print(f"❌ MLflow directory does not exist: {PATHS['mlruns']}")
+            try:
+                os.makedirs(PATHS["mlruns"], exist_ok=True)
+                print(f"✅ Created MLflow directory: {PATHS['mlruns']}")
+            except Exception as e:
+                print(f"❌ Failed to create MLflow directory: {e}")
+
+        # Try to import and use MLflow
+        try:
+            import mlflow
+
+            current_uri = mlflow.get_tracking_uri()
+            print(f"Current MLflow tracking URI: {current_uri}")
+
+            # Try to set the URI explicitly
+            try:
+                if mlflow_uri != "Not set":
+                    mlflow.set_tracking_uri(mlflow_uri)
+                    print(f"Set MLflow tracking URI to: {mlflow_uri}")
+                else:
+                    mlflow.set_tracking_uri(f"file://{PATHS['mlruns']}")
+                    print(f"Set MLflow tracking URI to: file://{PATHS['mlruns']}")
+
+                print(f"Updated MLflow tracking URI: {mlflow.get_tracking_uri()}")
+
+                # Try to list experiments
+                try:
+                    experiments = mlflow.search_experiments()
+                    print(f"Found {len(experiments)} experiments")
+                    for exp in experiments:
+                        print(f"  - {exp.name} (ID: {exp.experiment_id})")
+                except Exception as e:
+                    print(f"❌ Failed to list MLflow experiments: {e}")
+
+                # Try a simple tracking operation
+                try:
+                    with mlflow.start_run(run_name="test_connection"):
+                        mlflow.log_param("test_param", "test_value")
+                        mlflow.log_metric("test_metric", 1.0)
+                        print("✅ Successfully logged test run to MLflow")
+                except Exception as e:
+                    print(f"❌ Failed to log to MLflow: {e}")
+            except Exception as e:
+                print(f"❌ Failed to set MLflow tracking URI: {e}")
+        except ImportError as e:
+            print(f"❌ Failed to import MLflow: {e}")
+
+        return {"status": "completed", "mlflow_uri": mlflow_uri}
+    except Exception as e:
+        print(f"❌ Error in MLflow check task: {e}")
+        handle_task_error("check_mlflow", e)
+
+
 # DAG Definition
 default_args = {
     "owner": "airflow",
@@ -285,6 +411,9 @@ with DAG(
 ) as dag:
 
     # Task definitions
+    check_mlflow = PythonOperator(
+        task_id="check_mlflow", python_callable=task_check_mlflow
+    )
     extract = PythonOperator(task_id="extract", python_callable=task_extract)
     transform = PythonOperator(task_id="transform", python_callable=task_transform)
     load = PythonOperator(task_id="load", python_callable=task_load)
@@ -292,5 +421,5 @@ with DAG(
     evaluate = PythonOperator(task_id="evaluate", python_callable=task_evaluate)
     visualize = PythonOperator(task_id="visualize", python_callable=task_visualize)
 
-    # Task dependencies
-    extract >> transform >> load >> train >> evaluate >> visualize
+    # Task dependencies - add MLflow check as first task
+    check_mlflow >> extract >> transform >> load >> train >> evaluate >> visualize  # type: ignore

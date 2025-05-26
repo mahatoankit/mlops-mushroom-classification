@@ -75,21 +75,34 @@ except ImportError:
 # Import monitoring module
 from src.monitoring import monitor_model_performance
 
+# Configure MLflow tracking URI - Adding this is crucial
+# Set up MLflow tracking - store locally in the 'mlruns' directory
+mlflow.set_tracking_uri("file://" + os.path.abspath("mlruns"))
+os.makedirs("mlruns", exist_ok=True)
+
 # Create logs directory if it doesn't exist
 import os
+from pathlib import Path
 
-os.makedirs("logs", exist_ok=True)
+# Determine the project root directory (2 levels up from this file)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Create logs directory relative to the project root
+LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("logs/train.log"), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler(os.path.join(LOGS_DIR, "train.log")),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
 
-def validate_data_with_great_expectations(data, data_context_path="great_expectations"):
+def validate_data_with_great_expectations(data, data_context_path=None):
     """
     Validate data using Great Expectations
 
@@ -113,8 +126,10 @@ def validate_data_with_great_expectations(data, data_context_path="great_expecta
             return {"validation_passed": False, "error": "Input data is None or empty"}
 
         # Create absolute path for data context
-        if not os.path.isabs(data_context_path):
-            data_context_path = os.path.join(os.getcwd(), data_context_path)
+        if data_context_path is None:
+            data_context_path = os.path.join(PROJECT_ROOT, "great_expectations")
+        elif not os.path.isabs(data_context_path):
+            data_context_path = os.path.join(PROJECT_ROOT, data_context_path)
 
         # Initialize or get existing data context
         try:
@@ -225,7 +240,7 @@ def train_models(data_path, config):
     """Train multiple models and log to MLflow"""
     logger.info("Starting model training")
 
-    # Initialize MLflow experiment
+    # Initialize MLflow experiment with proper error handling
     experiment_name = "mushroom_classification"
     try:
         # Try to get existing experiment
@@ -247,7 +262,8 @@ def train_models(data_path, config):
     except Exception as e:
         logger.warning(f"Could not set up MLflow experiment: {e}")
         # Fallback: use default experiment
-        mlflow.set_experiment("Default")
+        logger.info("Using default experiment")
+        experiment_id = "0"  # Default experiment ID
 
     # Handle both file paths and DataFrames
     if isinstance(data_path, str):
@@ -431,7 +447,7 @@ def train_models(data_path, config):
     for model_name, model in models.items():
         logger.info(f"Training {model_name} model")
 
-        with mlflow.start_run(run_name=model_name):
+        with mlflow.start_run(run_name=model_name, experiment_id=experiment_id):
             # Create pipeline
             pipeline = Pipeline(
                 [
@@ -469,7 +485,11 @@ def train_models(data_path, config):
             # Log parameters
             if hasattr(model, "get_params"):
                 for param, value in model.get_params().items():
-                    mlflow.log_param(param, value)
+                    try:
+                        # Ensure the param value is serializable
+                        mlflow.log_param(param, str(value))
+                    except Exception as e:
+                        logger.warning(f"Could not log parameter {param}: {e}")
 
             # Create model signature and input example
             try:

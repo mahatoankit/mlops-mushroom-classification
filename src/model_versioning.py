@@ -11,15 +11,18 @@ import datetime
 from pathlib import Path
 import uuid
 
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
+# Determine the project root directory (2 levels up from this file)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Create logs directory relative to the project root
+LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("logs/model_versioning.log"),
+        logging.FileHandler(os.path.join(LOGS_DIR, "model_versioning.log")),
         logging.StreamHandler(),
     ],
 )

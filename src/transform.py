@@ -9,15 +9,22 @@ import logging
 import os
 from sklearn.preprocessing import LabelEncoder
 from scipy.stats import zscore
+from pathlib import Path
 
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
+# Determine the project root directory (2 levels up from this file)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Create logs directory relative to the project root
+LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("logs/transform.log"), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler(os.path.join(LOGS_DIR, "transform.log")),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -67,9 +74,7 @@ def transform_data(df):
 
         # Sample randomly from these values for imputation
         if encoded.isna().sum() > 0 and len(non_nan_values) > 0:
-            sampled_values = np.random.choice(
-                non_nan_values, size=encoded.isna().sum(), replace=True
-            )
+            sampled_values = np.random.choice(non_nan_values, size=encoded.isna().sum(), replace=True) # type: ignore
             # Create a copy and set the NaN values to the sampled values
             filled = encoded.copy()
             filled[filled.isna()] = sampled_values
