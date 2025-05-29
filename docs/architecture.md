@@ -101,3 +101,85 @@
 |            |      | Evaluation     |       |                |
 +------------+      +----------------+       +----------------+
 ```
+Data Ingestion Workflow - Mushroom Classification System
+========================================================
+
+┌─────────────────┐    ┌────────────────────┐    ┌─────────────────────┐
+│                 │    │                    │    │                     │
+│  Data Sources   │───▶│  Step 1: Fetch    │───▶│  Step 2: Initial    │
+│                 │    │  Data              │    │  Validation         │
+│ • secondary_    │    │                    │    │                     │
+│   data.csv      │    │ • File Reader      │    │ • Great Expectations│
+│ • fraction_     │    │ • Error Handling   │    │ • Schema Check      │
+│   dataset.csv   │    │ • Pandas CSV       │    │ • Format Check      │
+│                 │    │   Parser           │    │ • Data Type Check   │
+└─────────────────┘    └────────────────────┘    └─────────────────────┘
+                                │                            │
+                                │                            ▼
+                                │                 ┌─────────────────────┐
+                                │                 │                     │
+                                │                 │  Validation Failed? │
+                                │                 │                     │
+                                │                 │ ┌─────────────────┐ │
+                                │                 │ │ Alert & Stop    │ │
+                                │                 │ │ Pipeline        │ │
+                                │                 │ └─────────────────┘ │
+                                │                 └─────────────────────┘
+                                │                            │
+                                │                            ▼ (Pass)
+                                │                 ┌─────────────────────┐
+                                │                 │                     │
+                                │                 │  Step 3: Load to    │
+                                │                 │  Staging Table      │
+                                │                 │                     │
+                                │                 │ • PostgreSQL        │
+                                │                 │ • Staging Schema    │
+                                │                 │ • Raw Data Storage  │
+                                │                 └─────────────────────┘
+                                │                            │
+                                │                            ▼
+                                │                 ┌─────────────────────┐
+                                │                 │                     │
+                                │                 │  Step 4: Detailed   │
+                                │                 │  Data Validation    │
+                                │                 │                     │
+                                │                 │ • Content Checks    │
+                                │                 │ • Range Validation  │
+                                │                 │ • Set Membership    │
+                                │                 │ • Custom Rules      │
+                                │                 └─────────────────────┘
+                                │                            │
+                                │                            ▼
+                                │                 ┌─────────────────────┐
+                                │                 │                     │
+                                │                 │  Validation Failed? │
+                                │                 │                     │
+                                │                 │ ┌─────────────────┐ │
+                                │                 │ │ Generate Alerts │ │
+                                │                 │ │ & Reports       │ │
+                                │                 │ └─────────────────┘ │
+                                │                 └─────────────────────┘
+                                │                            │
+                                │                            ▼ (Pass)
+                                │                 ┌─────────────────────┐
+                                │                 │                     │
+                                │                 │  Step 5: Promote    │
+                                │                 │  to Production      │
+                                │                 │                     │
+                                │                 │ • MariaDB/          │
+                                │                 │   ColumnStore       │
+                                │                 │ • mushroom_data     │
+                                │                 │   table             │
+                                │                 └─────────────────────┘
+                                │                            │
+                                ▼                            ▼
+                    ┌─────────────────────┐    ┌─────────────────────┐
+                    │                     │    │                     │
+                    │  Airflow DAG        │    │  MLflow Tracking    │
+                    │  Orchestration      │    │                     │
+                    │                     │    │ • Data Lineage      │
+                    │ • Task Dependencies │    │ • Validation Results│
+                    │ • Retry Logic       │    │ • Pipeline Metrics  │
+                    │ • Scheduling        │    │ • Artifact Storage  │
+                    │ • Monitoring        │    │                     │
+                    └─────────────────────┘    └─────────────────────┘

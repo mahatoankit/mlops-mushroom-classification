@@ -10,63 +10,63 @@
 6. [MLOps Workflow](#mlops-workflow)
 7. [Container Architecture](#container-architecture)
 8. [Configuration Management](#configuration-management)
-9. [Monitoring and Observability](#monitoring-and-observability)
-10. [Security and Access Control](#security-and-access-control)
-11. [Performance Optimization](#performance-optimization)
-12. [Deployment Strategy](#deployment-strategy)
-13. [Troubleshooting Guide](#troubleshooting-guide)
-14. [Future Enhancements](#future-enhancements)
+9. [MLflow Integration and Experiment Tracking](#mlflow-integration-and-experiment-tracking)
+10. [Data Quality and Visualization Framework](#data-quality-and-visualization-framework)
+11. [Monitoring and Observability](#monitoring-and-observability)
+12. [Security and Access Control](#security-and-access-control)
+13. [Performance Optimization](#performance-optimization)
+14. [Deployment Strategy](#deployment-strategy)
+15. [Troubleshooting Guide](#troubleshooting-guide)
+16. [Recent Updates and Enhancements](#recent-updates-and-enhancements)
+17. [Future Enhancements](#future-enhancements)
 
 ## Executive Summary
 
-This project implements a production-ready MLOps pipeline for mushroom classification using a microservices architecture. The system demonstrates enterprise-level practices including automated workflow orchestration, experiment tracking, model versioning, and containerized deployment with MariaDB/ColumnStore for high-performance analytical data storage. The architecture supports scalable machine learning operations from data ingestion to model deployment and monitoring.
+This project implements a production-ready MLOps pipeline for mushroom classification using a microservices architecture with **comprehensive MLflow integration**, **automated data quality assessment**, and **enterprise-grade visualization capabilities**. The system demonstrates industry-leading practices including automated workflow orchestration, comprehensive experiment tracking with nested runs, model versioning with artifact management, and containerized deployment with MariaDB/ColumnStore for high-performance analytical data storage. 
+
+**Latest enhancements include**: Full MLflow experiment lifecycle management, automated data quality visualization, robust error handling with fallback mechanisms, and comprehensive artifact logging for complete model lineage tracking.
 
 ## System Architecture
 
-### High-Level Architecture Diagram
+### Enhanced High-Level Architecture Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    MLOps Infrastructure                         │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
-│  │   Airflow   │  │   MLflow    │  │  PostgreSQL │              │
-│  │ Orchestrator│  │   Server    │  │  Database   │              │
-│  │             │  │             │  │ (Metadata)  │              │
-│  │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │              │
-│  │ │Webserver│ │  │ │Tracking │ │  │ │Metadata │ │              │
-│  │ │Scheduler│ │  │ │Registry │ │  │ │Storage  │ │              │
-│  │ └─────────┘ │  │ └─────────┘ │  │ └─────────┘ │              │
-│  └─────────────┘  └─────────────┘  └─────────────┘              │
-│         │                 │                 │                   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
-│  │    Redis    │  │  ETL App    │  │ MariaDB/    │              │
-│  │   Message   │  │ Standalone  │  │ ColumnStore │              │
-│  │   Broker    │  │   Service   │  │ (Analytics) │              │
-│  └─────────────┘  └─────────────┘  └─────────────┘              │
-│                                           │                     │
-│                    ┌─────────────┐  ┌─────────────┐              │
-│                    │   Docker    │  │   Docker    │              │
-│                    │  Network    │  │  Network    │              │
-│                    │   Bridge    │  │   Bridge    │              │
-│                    └─────────────┘  └─────────────┘              │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         Enhanced MLOps Infrastructure                                 │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                 │
+│  │   Airflow   │  │   MLflow    │  │  PostgreSQL │  │  Visualizer │                 │
+│  │ Orchestrator│  │   Server    │  │  Database   │  │   Service   │                 │
+│  │             │  │             │  │ (Metadata)  │  │             │                 │
+│  │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │                 │
+│  │ │Enhanced │ │  │ │Enhanced │ │  │ │Metadata │ │  │ │Data     │ │                 │
+│  │ │DAG w/   │ │  │ │Tracking │ │  │ │Storage  │ │  │ │Quality  │ │                 │
+│  │ │MLflow   │ │  │ │& Nested │ │  │ │         │ │  │ │Viz      │ │                 │
+│  │ │Integration│ │ │ │Runs     │ │  │ │         │ │  │ │         │ │                 │
+│  │ └─────────┘ │  │ └─────────┘ │  │ └─────────┘ │  │ └─────────┘ │                 │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘                 │
+│         │                 │                 │                 │                     │
+│         │        ┌─────────────┐   ┌─────────────┐   ┌─────────────┐                 │
+│         │        │  Experiment │   │   Model     │   │   Artifact  │                 │
+│         │        │   Manager   │   │  Registry   │   │   Storage   │                 │
+│         │        │             │   │             │   │   Enhanced  │                 │
+│         │        └─────────────┘   └─────────────┘   └─────────────┘                 │
+│         │                 │                 │                 │                     │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                 │
+│  │    Redis    │  │  ETL App    │  │ MariaDB/    │  │  Quality    │                 │
+│  │   Message   │  │ Enhanced    │  │ ColumnStore │  │ Monitoring  │                 │
+│  │   Broker    │  │ w/ MLflow   │  │ (Analytics) │  │             │                 │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘                 │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Data Flow Architecture
+### Enhanced Data Flow Architecture with MLflow Integration
 
 ```
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │   Raw Data  │───▶│   Extract   │───▶│  Transform  │───▶│    Load     │
 │   Sources   │    │   Process   │    │   Process   │    │   Process   │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-       │                   │                   │                   │
-       ▼                   ▼                   ▼                   ▼
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│data/raw/    │    │ Validation  │    │ Feature Eng │    │ MariaDB/    │
-│             │    │ & Cleaning  │    │ & Selection │    │ ColumnStore │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-                           │                   │                   │
+│             │    │ + MLflow    │    │ + Quality   │    │ + Storage   │
                            ▼                   ▼                   ▼
                    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
                    │   Model     │    │   Model     │    │   Model     │
