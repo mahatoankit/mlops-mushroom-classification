@@ -64,7 +64,7 @@ This project implements a production-ready MLOps pipeline for mushroom classific
 
 ```
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Raw Data  │───▶│   Extract   │───▶│  Transform  │───▶│    Load     │
+│   Raw Data  │───▶│   Extract   │───▶│  Transform  │───▶│    Load    │
 │   Sources   │    │   Process   │    │   Process   │    │   Process   │
 │             │    │ + MLflow    │    │ + Quality   │    │ + Storage   │
                            ▼                   ▼                   ▼

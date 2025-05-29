@@ -1,6 +1,6 @@
 """
-Model training module for the mushroom classification pipeline.
-Trains and evaluates multiple models on the processed data with ColumnStore integration.
+XGBoost-focused training module for the mushroom classification pipeline.
+Trains and evaluates XGBoost model on the processed data with ColumnStore integration.
 """
 
 import os
@@ -26,9 +26,6 @@ try:
 except ImportError:
     GREAT_EXPECTATIONS_AVAILABLE = False
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -44,33 +41,38 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 
+# XGBoost with fallback
 try:
     import xgboost as xgb
+
+    XGBOOST_AVAILABLE = True
 except ImportError:
+    XGBOOST_AVAILABLE = False
+
     # Create a simple fallback if xgboost is not installed
     class XGBClassifierFallback:
         """Fallback class for XGBClassifier when xgboost is not installed."""
 
         def __init__(self, *args, **kwargs):
-            pass
+            self.params = kwargs
 
         def fit(self, X, y):
             return self
 
         def predict(self, X):
-            return [0] * len(X)
+            return np.zeros(len(X))
 
         def predict_proba(self, X):
             return np.array([[0.5, 0.5]] * len(X))
+
+        def get_params(self, deep=True):
+            return self.params
 
     class XGBoostModule:
         """Mock module for xgboost."""
 
         def __init__(self):
             self.XGBClassifier = XGBClassifierFallback
-
-        def plot_importance(self, *args, **kwargs):
-            pass
 
     xgb = XGBoostModule()
 
@@ -197,23 +199,18 @@ def load_data_from_columnstore(experiment_id, data_type="train"):
         raise
 
 
-def train_models_from_columnstore(experiment_id, config=None):
-    """Train multiple models using data from ColumnStore"""
-    logger.info(
-        f"Starting model training from ColumnStore for experiment {experiment_id}"
-    )
+def train_xgboost_model_from_columnstore(experiment_id, config=None):
+    """Train single XGBoost model - streamlined approach, no A/B testing"""
+    logger.info(f"Starting streamlined XGBoost training for experiment {experiment_id}")
+    logger.info("No A/B testing required - single model deployment approach")
 
     if config is None:
         config = {
-            "models": {
-                "random_forest": {"n_estimators": 100},
-                "gradient_boosting": {"n_estimators": 100},
-                "xgboost": {"n_estimators": 100, "max_depth": 6},
-            }
+            "xgboost": {"n_estimators": 100, "max_depth": 6, "learning_rate": 0.1}
         }
 
     # Initialize MLflow experiment
-    experiment_name = "mushroom_classification_columnstore"
+    experiment_name = "mushroom_classification_xgboost_streamlined"
     try:
         experiment = mlflow.get_experiment_by_name(experiment_name)
         if experiment is None:
@@ -278,153 +275,113 @@ def train_models_from_columnstore(experiment_id, config=None):
             y_test = le.transform(y_test)
             logger.info(f"Encoded target values: {np.unique(y_train)}")
 
-        # Define models
-        models = {
-            "logistic_regression": LogisticRegression(random_state=42),
-            "random_forest": RandomForestClassifier(
-                n_estimators=config.get("models", {})
-                .get("random_forest", {})
-                .get("n_estimators", 100),
-                random_state=42,
-            ),
-            "gradient_boosting": GradientBoostingClassifier(
-                n_estimators=config.get("models", {})
-                .get("gradient_boosting", {})
-                .get("n_estimators", 100),
-                random_state=42,
-            ),
-        }
+        # Single XGBoost model training - streamlined approach
+        model = xgb.XGBClassifier(
+            n_estimators=config.get("xgboost", {}).get("n_estimators", 100),
+            max_depth=config.get("xgboost", {}).get("max_depth", 6),
+            learning_rate=config.get("xgboost", {}).get("learning_rate", 0.1),
+            random_state=42,
+            use_label_encoder=False,
+            eval_metric="logloss",
+        )
 
-        # Try to add XGBoost if available
-        try:
-            if hasattr(xgb, "XGBClassifier") and not isinstance(
-                xgb.XGBClassifier, type(xgb.XGBClassifierFallback)
-            ):
-                models["xgboost"] = xgb.XGBClassifier(
-                    n_estimators=config.get("models", {})
-                    .get("xgboost", {})
-                    .get("n_estimators", 100),
-                    max_depth=config.get("models", {})
-                    .get("xgboost", {})
-                    .get("max_depth", 6),
-                    random_state=42,
+        logger.info("Training single XGBoost model - no comparison needed")
+
+        with mlflow.start_run(
+            run_name=f"streamlined_xgboost_{experiment_id}",
+            experiment_id=experiment_id_mlflow,
+        ):
+            # Create pipeline
+            pipeline = Pipeline(
+                [
+                    ("preprocessor", preprocessor),
+                    ("model", model),
+                ]
+            )
+
+            # Train model
+            pipeline.fit(X_train, y_train)
+
+            # Make predictions
+            y_pred = pipeline.predict(X_test)
+            y_pred_proba = pipeline.predict_proba(X_test)
+
+            # Calculate metrics
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(
+                y_test, y_pred, average="weighted", zero_division=0
+            )
+            recall = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+            f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+
+            # Store model results
+            model_results = {
+                "accuracy": accuracy,
+                "precision": precision,
+                "recall": recall,
+                "f1_score": f1,
+                "pipeline": pipeline,
+            }
+
+            # Log metrics to MLflow
+            mlflow.log_metric("accuracy", accuracy)
+            mlflow.log_metric("precision", precision)
+            mlflow.log_metric("recall", recall)
+            mlflow.log_metric("f1_score", f1)
+
+            # Log experiment metadata
+            mlflow.log_param("experiment_id", experiment_id)
+            mlflow.log_param("training_samples", len(X_train))
+            mlflow.log_param("test_samples", len(X_test))
+
+            # Log model parameters
+            if hasattr(model, "get_params"):
+                for param, value in model.get_params().items():
+                    try:
+                        mlflow.log_param(param, str(value))
+                    except Exception as e:
+                        logger.warning(f"Could not log parameter {param}: {e}")
+
+            # Create model signature and save model
+            try:
+                signature = infer_signature(X_train, y_pred_proba)
+                input_example = X_train.head(3)
+
+                mlflow.sklearn.log_model(
+                    pipeline,
+                    "xgboost_model",
+                    signature=signature,
+                    input_example=input_example,
                 )
-                logger.info("Added XGBoost to training models")
-        except Exception as e:
-            logger.warning(f"Could not add XGBoost to training: {e}")
+                logger.info("Logged XGBoost model to MLflow with signature")
+            except Exception as e:
+                logger.warning(f"Could not create signature for XGBoost: {e}")
+                mlflow.sklearn.log_model(pipeline, "xgboost_model")
 
-        best_model = None
-        best_accuracy = 0
-        trained_models = {}
-        model_results = {}
+            # Log that A/B testing is not needed
+            mlflow.log_param("training_approach", "single_model_streamlined")
+            mlflow.log_param("ab_testing_required", False)
+            mlflow.log_param("model_comparison", "not_applicable")
+            mlflow.log_param("deployment_strategy", "direct_production_deployment")
 
-        for model_name, model in models.items():
-            logger.info(f"Training {model_name} model")
+            logger.info(
+                f"Streamlined XGBoost training completed - Accuracy: {accuracy:.4f}"
+            )
 
-            with mlflow.start_run(
-                run_name=f"{model_name}_{experiment_id}",
-                experiment_id=experiment_id_mlflow,
-            ):
-                # Create pipeline
-                pipeline = Pipeline(
-                    [
-                        ("preprocessor", preprocessor),
-                        ("model", model),
-                    ]
-                )
-
-                # Train model
-                pipeline.fit(X_train, y_train)
-                trained_models[model_name] = pipeline
-
-                # Make predictions
-                y_pred = pipeline.predict(X_test)
-                y_pred_proba = None
-
-                # Get prediction probabilities if available
-                try:
-                    y_pred_proba = pipeline.predict_proba(X_test)
-                except:
-                    pass
-
-                # Calculate metrics
-                accuracy = accuracy_score(y_test, y_pred)
-                precision = precision_score(
-                    y_test, y_pred, average="weighted", zero_division=0
-                )
-                recall = recall_score(
-                    y_test, y_pred, average="weighted", zero_division=0
-                )
-                f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
-
-                # Store model results
-                model_results[model_name] = {
-                    "accuracy": accuracy,
-                    "precision": precision,
-                    "recall": recall,
-                    "f1_score": f1,
-                    "pipeline": pipeline,
-                }
-
-                # Log metrics to MLflow
-                mlflow.log_metric("accuracy", accuracy)
-                mlflow.log_metric("precision", precision)
-                mlflow.log_metric("recall", recall)
-                mlflow.log_metric("f1_score", f1)
-
-                # Log experiment metadata
-                mlflow.log_param("experiment_id", experiment_id)
-                mlflow.log_param("training_samples", len(X_train))
-                mlflow.log_param("test_samples", len(X_test))
-
-                # Log model parameters
-                if hasattr(model, "get_params"):
-                    for param, value in model.get_params().items():
-                        try:
-                            mlflow.log_param(param, str(value))
-                        except Exception as e:
-                            logger.warning(f"Could not log parameter {param}: {e}")
-
-                # Create model signature and save model
-                try:
-                    if y_pred_proba is not None:
-                        signature = infer_signature(X_train, y_pred_proba)
-                    else:
-                        signature = infer_signature(X_train, y_pred)
-
-                    input_example = X_train.head(3)
-
-                    mlflow.sklearn.log_model(
-                        pipeline,
-                        model_name,
-                        signature=signature,
-                        input_example=input_example,
-                    )
-                    logger.info(f"Logged {model_name} to MLflow with signature")
-                except Exception as e:
-                    logger.warning(f"Could not create signature for {model_name}: {e}")
-                    mlflow.sklearn.log_model(pipeline, model_name)
-
-                logger.info(f"{model_name} - Accuracy: {accuracy:.4f}")
-
-                if accuracy > best_accuracy:
-                    best_accuracy = accuracy
-                    best_model = model_name
-
-        logger.info(f"Best model: {best_model} with accuracy: {best_accuracy:.4f}")
-
-        # Return comprehensive results
-        return {
-            "best_model": best_model,
-            "best_accuracy": best_accuracy,
-            "model_results": model_results,
-            "trained_models": trained_models,
-            "experiment_id": experiment_id,
-            "validation_results": validation_results,
-        }
+    # Return streamlined results
+    return {
+        "model_type": "xgboost_streamlined",
+        "accuracy": accuracy,
+        "model_results": model_results,
+        "trained_model": pipeline,
+        "experiment_id": experiment_id,
+        "validation_results": validation_results,
+        "ab_testing_required": False,
+        "deployment_ready": True,
+    }
 
     except Exception as e:
-        logger.error(f"Error in model training: {e}")
+        logger.error(f"Error in streamlined model training: {e}")
         raise
 
 
