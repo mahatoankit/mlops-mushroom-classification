@@ -1,8 +1,3 @@
-"""
-XGBoost-focused training module for the mushroom classification pipeline.
-Trains and evaluates XGBoost model on the processed data with ColumnStore integration.
-"""
-
 import os
 import pandas as pd
 import numpy as np
@@ -13,6 +8,7 @@ import mlflow
 import mlflow.sklearn
 from mlflow.models.signature import infer_signature
 import sys
+from datetime import datetime
 
 # Add project root to path
 sys.path.append("/app")
@@ -25,6 +21,19 @@ try:
     GREAT_EXPECTATIONS_AVAILABLE = True
 except ImportError:
     GREAT_EXPECTATIONS_AVAILABLE = False
+
+    # Mock classes for compatibility
+    class MockGX:
+        @staticmethod
+        def get_context():
+            return None
+
+    class MockExpectationSuite:
+        pass
+
+    # Assign mock classes to the module names
+    gx = MockGX()
+    ExpectationSuite = MockExpectationSuite
 
 from sklearn.metrics import (
     accuracy_score,
@@ -40,6 +49,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier
 
 # XGBoost with fallback
 try:
@@ -77,13 +87,63 @@ except ImportError:
     xgb = XGBoostModule()
 
 # Import database manager for ColumnStore integration
-from config.database import db_manager
-
-# Configure MLflow for containerized environment
-mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-server:5000"))
+try:
+    from config.database import db_manager
+except ImportError:
+    logger = logging.getLogger(__name__)
+    logger.warning("Could not import database manager - some functions may not work")
+    db_manager = None
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Configure MLflow for containerized environment
+mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-server:5001")
+mlflow.set_tracking_uri(mlflow_uri)
+logger.info(f"MLflow tracking URI set to: {mlflow_uri}")
+
+
+def setup_mlflow_experiment(experiment_name="mushroom_classification_comprehensive"):
+    """Setup MLflow experiment with proper error handling"""
+    try:
+        # Set tracking URI consistently
+        mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-server:5001")
+        mlflow.set_tracking_uri(mlflow_uri)
+        logger.info(f"MLflow tracking URI: {mlflow_uri}")
+
+        # Create or get experiment
+        try:
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            if experiment is None:
+                experiment_id = mlflow.create_experiment(
+                    experiment_name,
+                    artifact_location=f"/app/mlflow_artifacts/{experiment_name}",
+                )
+                logger.info(
+                    f"Created MLflow experiment: {experiment_name} (ID: {experiment_id})"
+                )
+            else:
+                experiment_id = experiment.experiment_id
+                logger.info(
+                    f"Using existing MLflow experiment: {experiment_name} (ID: {experiment_id})"
+                )
+
+            # Set the experiment as active
+            mlflow.set_experiment(experiment_name)
+
+            # Test connectivity with a simple API call
+            mlflow.search_runs(experiment_ids=[experiment_id], max_results=1)
+            logger.info("MLflow connectivity test successful")
+
+            return True, experiment_id
+
+        except Exception as e:
+            logger.error(f"MLflow experiment setup failed: {e}")
+            return False, None
+
+    except Exception as e:
+        logger.error(f"MLflow setup failed: {e}")
+        return False, None
 
 
 def validate_data_with_great_expectations(data, data_context_path=None):
@@ -139,7 +199,7 @@ def validate_data_with_great_expectations(data, data_context_path=None):
 
 def load_data_from_columnstore(experiment_id, data_type="train"):
     """
-    Load data from ColumnStore for training.
+    Load data from ColumnStore using the same approach as columnstore_trainer.py
 
     Args:
         experiment_id (str): Experiment ID
@@ -153,7 +213,7 @@ def load_data_from_columnstore(experiment_id, data_type="train"):
             f"Loading {data_type} data from ColumnStore for experiment {experiment_id}"
         )
 
-        # Map data type to table name
+        # Map data type to table name (same as columnstore_trainer.py)
         table_mapping = {
             "train": "train_data",
             "test": "test_data",
@@ -165,7 +225,7 @@ def load_data_from_columnstore(experiment_id, data_type="train"):
 
         table_name = table_mapping[data_type]
 
-        # Query to get data
+        # Use exact same query structure as columnstore_trainer.py
         query = f"""
         SELECT cf.* 
         FROM cleaned_features cf
@@ -173,6 +233,20 @@ def load_data_from_columnstore(experiment_id, data_type="train"):
         WHERE td.experiment_id = %s
         """
 
+        if db_manager is None:
+            raise ValueError(
+                "Database manager not available - cannot load ColumnStore data"
+            )
+
+        if (
+            not hasattr(db_manager, "mariadb_engine")
+            or db_manager.mariadb_engine is None
+        ):
+            raise ValueError(
+                "Database engine not available - cannot load ColumnStore data"
+            )
+
+        # Load data using same approach as columnstore_trainer.py
         df = pd.read_sql(query, db_manager.mariadb_engine, params=[experiment_id])
 
         if df.empty:
@@ -180,7 +254,7 @@ def load_data_from_columnstore(experiment_id, data_type="train"):
                 f"No {data_type} data found for experiment {experiment_id}"
             )
 
-        # Separate features and target
+        # Separate features and target (same logic as columnstore_trainer.py)
         target_column = "class"
         feature_columns = [
             col
@@ -200,41 +274,38 @@ def load_data_from_columnstore(experiment_id, data_type="train"):
 
 
 def train_xgboost_model_from_columnstore(experiment_id, config=None):
-    """Train single XGBoost model - streamlined approach, no A/B testing"""
-    logger.info(f"Starting streamlined XGBoost training for experiment {experiment_id}")
-    logger.info("No A/B testing required - single model deployment approach")
+    """Train XGBoost model using ColumnStore data with comprehensive MLflow tracking"""
+    logger.info(
+        f"Starting XGBoost training from ColumnStore for experiment {experiment_id}"
+    )
+
+    # Setup MLflow experiment
+    mlflow_available, mlflow_experiment_id = setup_mlflow_experiment(
+        "mushroom_xgboost_columnstore"
+    )
+
+    if not mlflow_available:
+        logger.warning("MLflow not available - training without tracking")
 
     if config is None:
         config = {
             "xgboost": {"n_estimators": 100, "max_depth": 6, "learning_rate": 0.1}
         }
 
-    # Initialize MLflow experiment
-    experiment_name = "mushroom_classification_xgboost_streamlined"
     try:
-        experiment = mlflow.get_experiment_by_name(experiment_name)
-        if experiment is None:
-            experiment_id_mlflow = mlflow.create_experiment(experiment_name)
-            logger.info(
-                f"Created new MLflow experiment: {experiment_name} (ID: {experiment_id_mlflow})"
-            )
-        else:
-            experiment_id_mlflow = experiment.experiment_id
-            logger.info(
-                f"Using existing MLflow experiment: {experiment_name} (ID: {experiment_id_mlflow})"
-            )
-
-        mlflow.set_experiment(experiment_name)
-    except Exception as e:
-        logger.warning(f"Could not set up MLflow experiment: {e}")
-        experiment_id_mlflow = "0"
-
-    try:
-        # Load training and test data from ColumnStore
+        # Load data from ColumnStore using the same approach as columnstore_trainer.py
         X_train, y_train = load_data_from_columnstore(experiment_id, "train")
         X_test, y_test = load_data_from_columnstore(experiment_id, "test")
 
-        # Add Great Expectations validation
+        # Try to load validation data (optional)
+        try:
+            X_val, y_val = load_data_from_columnstore(experiment_id, "validation")
+            logger.info(f"Validation data loaded: {X_val.shape}")
+        except Exception as e:
+            logger.warning(f"No validation data available: {e}")
+            X_val, y_val = pd.DataFrame(), pd.Series()
+
+        # Data validation
         logger.info("Running data validation...")
         train_data = pd.concat([X_train, y_train], axis=1)
         validation_results = validate_data_with_great_expectations(train_data)
@@ -267,15 +338,22 @@ def train_xgboost_model_from_columnstore(experiment_id, config=None):
             ]
         )
 
-        # Encode target variable if it's categorical
+        # Encode target variable if categorical
         le = None
         if y_train.dtype == "object":
             le = LabelEncoder()
-            y_train = le.fit_transform(y_train)
-            y_test = le.transform(y_test)
-            logger.info(f"Encoded target values: {np.unique(y_train)}")
+            y_train_encoded = le.fit_transform(y_train)
+            y_test_encoded = le.transform(y_test)
+            logger.info(f"Encoded target values: {np.unique(y_train_encoded)}")
+            y_train = pd.Series(y_train_encoded, index=y_train.index)
+            y_test = pd.Series(y_test_encoded, index=y_test.index)
+        else:
+            if not isinstance(y_train, pd.Series):
+                y_train = pd.Series(y_train)
+            if not isinstance(y_test, pd.Series):
+                y_test = pd.Series(y_test)
 
-        # Single XGBoost model training - streamlined approach
+        # XGBoost model configuration
         model = xgb.XGBClassifier(
             n_estimators=config.get("xgboost", {}).get("n_estimators", 100),
             max_depth=config.get("xgboost", {}).get("max_depth", 6),
@@ -285,158 +363,197 @@ def train_xgboost_model_from_columnstore(experiment_id, config=None):
             eval_metric="logloss",
         )
 
-        logger.info("Training single XGBoost model - no comparison needed")
+        logger.info("Training XGBoost model with ColumnStore data")
 
-        with mlflow.start_run(
-            run_name=f"streamlined_xgboost_{experiment_id}",
-            experiment_id=experiment_id_mlflow,
-        ):
-            # Create pipeline
-            pipeline = Pipeline(
-                [
-                    ("preprocessor", preprocessor),
-                    ("model", model),
-                ]
-            )
+        # MLflow tracking
+        if mlflow_available:
+            with mlflow.start_run(
+                run_name=f"mushroom_xgboost_columnstore_{experiment_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                experiment_id=mlflow_experiment_id,
+            ) as run:
+                logger.info(f"Started MLflow run: {run.info.run_id}")
 
-            # Train model
-            pipeline.fit(X_train, y_train)
-
-            # Make predictions
-            y_pred = pipeline.predict(X_test)
-            y_pred_proba = pipeline.predict_proba(X_test)
-
-            # Calculate metrics
-            accuracy = accuracy_score(y_test, y_pred)
-            precision = precision_score(
-                y_test, y_pred, average="weighted", zero_division=0
-            )
-            recall = recall_score(y_test, y_pred, average="weighted", zero_division=0)
-            f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
-
-            # Store model results
-            model_results = {
-                "accuracy": accuracy,
-                "precision": precision,
-                "recall": recall,
-                "f1_score": f1,
-                "pipeline": pipeline,
-            }
-
-            # Log metrics to MLflow
-            mlflow.log_metric("accuracy", accuracy)
-            mlflow.log_metric("precision", precision)
-            mlflow.log_metric("recall", recall)
-            mlflow.log_metric("f1_score", f1)
-
-            # Log experiment metadata
-            mlflow.log_param("experiment_id", experiment_id)
-            mlflow.log_param("training_samples", len(X_train))
-            mlflow.log_param("test_samples", len(X_test))
-
-            # Log model parameters
-            if hasattr(model, "get_params"):
-                for param, value in model.get_params().items():
-                    try:
-                        mlflow.log_param(param, str(value))
-                    except Exception as e:
-                        logger.warning(f"Could not log parameter {param}: {e}")
-
-            # Create model signature and save model
-            try:
-                signature = infer_signature(X_train, y_pred_proba)
-                input_example = X_train.head(3)
-
-                mlflow.sklearn.log_model(
-                    pipeline,
-                    "xgboost_model",
-                    signature=signature,
-                    input_example=input_example,
+                # Create and train pipeline
+                pipeline = Pipeline(
+                    [
+                        ("preprocessor", preprocessor),
+                        ("model", model),
+                    ]
                 )
-                logger.info("Logged XGBoost model to MLflow with signature")
-            except Exception as e:
-                logger.warning(f"Could not create signature for XGBoost: {e}")
-                mlflow.sklearn.log_model(pipeline, "xgboost_model")
+                pipeline.fit(X_train, y_train)
 
-            # Log that A/B testing is not needed
-            mlflow.log_param("training_approach", "single_model_streamlined")
-            mlflow.log_param("ab_testing_required", False)
-            mlflow.log_param("model_comparison", "not_applicable")
-            mlflow.log_param("deployment_strategy", "direct_production_deployment")
+                # Make predictions
+                y_pred = pipeline.predict(X_test)
+                y_pred_proba = pipeline.predict_proba(X_test)
+
+                # Calculate metrics
+                accuracy = accuracy_score(y_test, y_pred)
+                precision = precision_score(
+                    y_test, y_pred, average="weighted", zero_division=0
+                )
+                recall = recall_score(
+                    y_test, y_pred, average="weighted", zero_division=0
+                )
+                f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+
+                # Log metrics
+                mlflow.log_metric("accuracy", float(accuracy))
+                mlflow.log_metric("precision", float(precision))
+                mlflow.log_metric("recall", float(recall))
+                mlflow.log_metric("f1_score", float(f1))
+
+                # Log parameters
+                mlflow.log_param("model_type", "xgboost_columnstore")
+                mlflow.log_param("experiment_id", experiment_id)
+                mlflow.log_param("training_samples", len(X_train))
+                mlflow.log_param("test_samples", len(X_test))
+                mlflow.log_param("feature_count", X_train.shape[1])
+                mlflow.log_param("data_source", "columnstore")
+
+                # Log XGBoost parameters
+                xgb_params = model.get_params()
+                for param_name, param_value in xgb_params.items():
+                    mlflow.log_param(f"xgb_{param_name}", param_value)
+
+                # Log preprocessing info
+                mlflow.log_param("categorical_features", len(categorical_columns))
+                mlflow.log_param("numerical_features", len(numerical_columns))
+
+                # Log validation results
+                for key, value in validation_results.items():
+                    if isinstance(value, (int, float, bool)):
+                        mlflow.log_metric(
+                            f"validation_{key}",
+                            int(value) if isinstance(value, bool) else value,
+                        )
+
+                # Log model with signature
+                try:
+                    signature = infer_signature(X_train, y_pred_proba)
+                    input_example = X_train.head(3)
+                    mlflow.sklearn.log_model(
+                        pipeline,
+                        "mushroom_xgboost_columnstore_model",
+                        signature=signature,
+                        input_example=input_example,
+                        registered_model_name="mushroom_classifier_xgboost_columnstore",
+                    )
+                    logger.info("Successfully logged model with signature to MLflow")
+                except Exception as e:
+                    logger.warning(f"Could not create signature: {e}")
+                    mlflow.sklearn.log_model(
+                        pipeline,
+                        "mushroom_xgboost_columnstore_model",
+                        registered_model_name="mushroom_classifier_xgboost_columnstore",
+                    )
+
+                logger.info(
+                    f"✅ ColumnStore XGBoost training completed - Accuracy: {accuracy:.4f}"
+                )
+                logger.info(f"✅ MLflow run: {run.info.run_id}")
+
+                return {
+                    "model_type": "xgboost_columnstore",
+                    "accuracy": accuracy,
+                    "precision": precision,
+                    "recall": recall,
+                    "f1_score": f1,
+                    "pipeline": pipeline,
+                    "experiment_id": experiment_id,
+                    "mlflow_experiment_id": mlflow_experiment_id,
+                    "mlflow_run_id": run.info.run_id,
+                    "validation_results": validation_results,
+                    "data_source": "columnstore",
+                    "deployment_ready": True,
+                }
+
+        else:
+            # Train without MLflow
+            pipeline = Pipeline([("preprocessor", preprocessor), ("model", model)])
+            pipeline.fit(X_train, y_train)
+            y_pred = pipeline.predict(X_test)
+            accuracy = accuracy_score(y_test, y_pred)
 
             logger.info(
-                f"Streamlined XGBoost training completed - Accuracy: {accuracy:.4f}"
+                f"ColumnStore XGBoost training completed without MLflow - Accuracy: {accuracy:.4f}"
             )
 
-    # Return streamlined results
-    return {
-        "model_type": "xgboost_streamlined",
-        "accuracy": accuracy,
-        "model_results": model_results,
-        "trained_model": pipeline,
-        "experiment_id": experiment_id,
-        "validation_results": validation_results,
-        "ab_testing_required": False,
-        "deployment_ready": True,
-    }
+            return {
+                "model_type": "xgboost_columnstore",
+                "accuracy": accuracy,
+                "pipeline": pipeline,
+                "experiment_id": experiment_id,
+                "data_source": "columnstore",
+                "deployment_ready": True,
+            }
 
     except Exception as e:
-        logger.error(f"Error in streamlined model training: {e}")
+        logger.error(f"Error in ColumnStore XGBoost training: {e}")
         raise
 
 
-# Legacy function for backward compatibility
-def train_models(data_path, config):
-    """Legacy train_models function for backward compatibility"""
-    logger.warning(
-        "Legacy train_models called - this should be updated to use ColumnStore"
+# Main training function for DAG integration
+def train_models_from_columnstore(experiment_id, config=None):
+    """
+    Main training function for DAG integration using ColumnStore data
+
+    Args:
+        experiment_id (str): Experiment ID for ColumnStore data
+        config (dict): Training configuration
+
+    Returns:
+        dict: Training results in DAG-compatible format
+    """
+    logger.info(
+        f"Training XGBoost model from ColumnStore for experiment {experiment_id}"
     )
 
-    # If data_path is an experiment_id string, use new function
-    if isinstance(data_path, str) and data_path.startswith("exp_"):
-        return train_models_from_columnstore(data_path, config)
+    try:
+        # Use XGBoost training with ColumnStore data
+        results = train_xgboost_model_from_columnstore(experiment_id, config)
 
-    # Otherwise, try to handle as before but with warnings
-    logger.warning("Using legacy training method - consider migrating to ColumnStore")
+        # Format results for DAG compatibility
+        return {
+            "best_model": "xgboost_columnstore",
+            "best_accuracy": results.get("accuracy", 0.0),
+            "model_type": "xgboost_columnstore",
+            "accuracy": results.get("accuracy", 0.0),
+            "results": results,
+            "experiment_id": experiment_id,
+            "data_source": "columnstore",
+            "deployment_ready": results.get("deployment_ready", True),
+        }
 
-    # Handle both file paths and DataFrames
-    if isinstance(data_path, str):
-        if not os.path.exists(data_path):
-            logger.error(f"Data file not found: {data_path}")
-            raise FileNotFoundError(f"Data file not found: {data_path}")
-        data = pd.read_csv(data_path)
-    elif isinstance(data_path, pd.DataFrame):
-        data = data_path.copy()
-    else:
-        raise ValueError(
-            f"data_path must be a string (file path) or DataFrame, got {type(data_path)}"
-        )
+    except Exception as e:
+        logger.error(f"Error in ColumnStore training: {e}")
+        raise
 
-    # Simple training for legacy support
-    if "class" in data.columns:
-        target_column = "class"
-    elif "edible" in data.columns:
-        target_column = "edible"
-    else:
-        target_column = data.columns[-1]
 
-    X = data.drop(columns=[target_column])
-    y = data[target_column]
+def main():
+    """Main function for standalone execution"""
+    logger.info("Starting XGBoost training with ColumnStore data")
 
-    # Encode target if categorical
-    if y.dtype == "object":
-        le = LabelEncoder()
-        y = le.fit_transform(y)
+    # Test database connection
+    if db_manager and hasattr(db_manager, "test_mariadb_connection"):
+        if not db_manager.test_mariadb_connection():
+            logger.error("MariaDB connection test failed")
+            return False
 
-    # Simple train-test split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42
+    # Get experiment ID
+    experiment_id = os.getenv(
+        "EXPERIMENT_ID", f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
 
-    # Train a simple model
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
+    # Run training
+    try:
+        results = train_models_from_columnstore(experiment_id)
+        logger.info(f"Training completed successfully: {results}")
+        return True
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        return False
 
-    accuracy = model.score(X_test, y_test)
 
-    return "random_forest", accuracy
+if __name__ == "__main__":
+    success = main()
+    exit(0 if success else 1)

@@ -8,8 +8,10 @@ import logging
 import pandas as pd
 import numpy as np
 from typing import Optional, Union, Any, Dict, List
+from sklearn.preprocessing import LabelEncoder
 
 # Configure logging
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,10 +35,11 @@ class MushroomModel:
         self.model_type = model_type
         self.model: Optional[Any] = None
         self.feature_names: Optional[List[str]] = None
+        self.categorical_encoders: Dict[str, LabelEncoder] = {}
         self.load_model()
 
     def load_model(self):
-        """Load the saved model."""
+        """Load the saved model and its preprocessing artifacts."""
         try:
             logger.info(f"Loading {self.model_type} model from {self.model_path}")
 
@@ -49,13 +52,20 @@ class MushroomModel:
             self.model = joblib.load(self.model_path)
 
             # Load feature names if available
-            feature_file = os.path.join(
-                os.path.dirname(self.model_path), "feature_names.txt"
-            )
+            model_dir = os.path.dirname(self.model_path)
+            feature_file = os.path.join(model_dir, "feature_names.txt")
             if os.path.exists(feature_file):
                 with open(feature_file, "r") as f:
                     self.feature_names = f.read().strip().split(",")
                 logger.info(f"Loaded {len(self.feature_names)} feature names")
+
+            # Load categorical encoders if available
+            encoders_file = os.path.join(model_dir, "categorical_encoders.joblib")
+            if os.path.exists(encoders_file):
+                self.categorical_encoders = joblib.load(encoders_file)
+                logger.info(
+                    f"Loaded {len(self.categorical_encoders)} categorical encoders"
+                )
 
             logger.info(f"Successfully loaded {self.model_type} model")
 
@@ -80,6 +90,19 @@ class MushroomModel:
             if isinstance(data, dict):
                 data = pd.DataFrame([data])
 
+            # Apply categorical encoding if encoders are available
+            if self.categorical_encoders:
+                for col, encoder in self.categorical_encoders.items():
+                    if col in data.columns:
+                        try:
+                            data[col] = encoder.transform(data[col])
+                        except ValueError:
+                            # Handle unseen categories
+                            logger.warning(
+                                f"Unseen category in {col}, using default encoding"
+                            )
+                            data[col] = 0
+
             # Ensure all required features are present
             if self.feature_names:
                 missing_features = set(self.feature_names) - set(data.columns)
@@ -95,8 +118,9 @@ class MushroomModel:
                     logger.warning(
                         f"Extra features that will be ignored: {extra_features}"
                     )
-                    # Keep only the features used by the model
-                    data = data[self.feature_names]
+
+                # Keep only the features used by the model in the correct order
+                data = data[self.feature_names]
 
             logger.info(f"Input data preprocessed. Shape: {data.shape}")
             return data

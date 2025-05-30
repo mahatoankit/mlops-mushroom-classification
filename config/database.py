@@ -160,10 +160,6 @@ class DatabaseManager:
             logger.error(f"Error creating database tables: {e}")
             return False
 
-    def create_columnstore_tables(self) -> bool:
-        """Create ColumnStore tables - alias for create_tables() for compatibility."""
-        return self.create_tables()
-
     def insert_cleaned_data(self, df: pd.DataFrame, data_version: str) -> bool:
         """Insert cleaned data into MariaDB."""
         try:

@@ -9,44 +9,84 @@ import yaml
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+import traceback
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # Add the project directory to the Python path to import from src
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.insert(0, project_root)
 
-from src.model_serving.model_loader import MushroomModel
-from src.ab_testing import get_model_for_request, record_prediction_result
+# Configure logging with file creation
+log_dir = os.path.join(project_root, "logs")
+os.makedirs(log_dir, exist_ok=True)
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("logs/api.log"), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler(os.path.join(log_dir, "api.log")),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
-# Load configuration
+# Log startup
+logger.info("=" * 50)
+logger.info("MUSHROOM CLASSIFICATION API STARTING UP")
+logger.info(f"Project root: {project_root}")
+logger.info("=" * 50)
+
+# Load configuration with fallback
+config = {"paths": {"models": "models"}}  # Default config
 try:
-    config_path = "config/config.yaml"
-    with open(config_path, "r") as file:
-        config = yaml.safe_load(file)
-    logger.info(f"Loaded configuration from {config_path}")
+    config_path = os.path.join(project_root, "config", "config.yaml")
+    if os.path.exists(config_path):
+        with open(config_path, "r") as file:
+            config = yaml.safe_load(file)
+        logger.info(f"Loaded configuration from {config_path}")
+    else:
+        logger.warning(f"Config file not found at {config_path}, using defaults")
 except Exception as e:
     logger.error(f"Error loading configuration: {e}")
-    config = {"paths": {"models": "models"}}
 
-# Define the application
+# Try to import model loader with error handling
+try:
+    from src.model_serving.model_loader import MushroomModel
+
+    logger.info("Successfully imported MushroomModel")
+    MODEL_LOADER_AVAILABLE = True
+except ImportError as e:
+    logger.error(f"Failed to import MushroomModel: {e}")
+    MODEL_LOADER_AVAILABLE = False
+
+
+# Define the application with CORS
 app = FastAPI(
     title="Mushroom Classification API",
     description="API for predicting mushroom edibility based on various features",
     version="1.0.0",
 )
 
-# We'll load models dynamically based on A/B testing configuration
-# For now, we'll just keep a cache of models
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Global variables
 model_cache = {}
+api_stats = {
+    "startup_time": datetime.now(),
+    "total_predictions": 0,
+    "successful_predictions": 0,
+    "failed_predictions": 0,
+}
 
 
 # Input schema definition
@@ -116,218 +156,221 @@ class PredictionResult(BaseModel):
     )
 
 
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the API on startup."""
+    logger.info("API startup event triggered")
+
+    # Check for model files
+    models_dir = os.path.join(project_root, "models")
+    logger.info(f"Checking models directory: {models_dir}")
+
+    if os.path.exists(models_dir):
+        model_files = [
+            f for f in os.listdir(models_dir) if f.endswith((".joblib", ".pkl"))
+        ]
+        logger.info(f"Found model files: {model_files}")
+    else:
+        logger.warning(f"Models directory does not exist: {models_dir}")
+        os.makedirs(models_dir, exist_ok=True)
+
+    # Try to load a default model
+    try:
+        default_model_path = os.path.join(models_dir, "latest_model.joblib")
+        if os.path.exists(default_model_path):
+            model_cache["default"] = MushroomModel(
+                default_model_path, model_type="xgboost"
+            )
+            logger.info("Successfully loaded default model")
+        else:
+            logger.warning(f"Default model not found at {default_model_path}")
+    except Exception as e:
+        logger.error(f"Failed to load default model: {e}")
+
+
 @app.get("/")
 async def root():
     """Root endpoint returning API information."""
-    return {"message": "Mushroom Classification API is running"}
+    return {
+        "message": "Mushroom Classification API is running",
+        "status": "healthy",
+        "startup_time": api_stats["startup_time"].isoformat(),
+        "total_predictions": api_stats["total_predictions"],
+        "models_loaded": len(model_cache),
+    }
 
 
 @app.post("/predict", response_model=PredictionResult)
 async def predict(
     features: MushroomFeatures,
-    ab_test: Optional[str] = Query(None, description="Name of A/B test to use"),
     ground_truth: Optional[int] = Query(
         None, description="Ground truth for model evaluation (0=Poisonous, 1=Edible)"
     ),
 ):
-    """
-    Make a prediction based on the provided mushroom features.
-    Optional A/B testing parameter allows routing to a specific test.
-    """
+    """Make a prediction based on the provided mushroom features."""
+    api_stats["total_predictions"] += 1
+
     try:
-        logger.info("Received prediction request")
+        logger.info(f"Received prediction request #{api_stats['total_predictions']}")
 
-        # Get appropriate model based on A/B testing configuration
-        model_path, test_id = get_model_for_request(ab_test)
+        # Get model (try cache first, then load)
+        current_model = None
+        if "default" in model_cache:
+            current_model = model_cache["default"]
+        else:
+            # Try to load model dynamically
+            models_dir = os.path.join(project_root, "models")
+            model_files = []
+            if os.path.exists(models_dir):
+                model_files = [
+                    f for f in os.listdir(models_dir) if f.endswith((".joblib", ".pkl"))
+                ]
 
-        # Load model from cache or create new
-        if model_path not in model_cache:
-            model_type = "xgboost"  # Default, could be inferred from filename
-            model_cache[model_path] = MushroomModel(model_path, model_type=model_type)
-            logger.info(f"Loaded model from {model_path}")
-
-        # Get model from cache
-        current_model = model_cache[model_path]
+            if model_files:
+                model_path = os.path.join(models_dir, model_files[0])
+                current_model = MushroomModel(model_path, model_type="xgboost")
+                model_cache["default"] = current_model
+                logger.info(f"Dynamically loaded model: {model_files[0]}")
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="No trained model available. Please train a model first.",
+                )
 
         # Convert Pydantic model to dict
         feature_dict = features.model_dump()
+        logger.info(f"Features received: {feature_dict}")
 
         # Make prediction
         result = current_model.predict(feature_dict)
 
-        # Add model info to result
-        result["model_type"] = current_model.model_type
-        result["model_path"] = model_path
+        # Add metadata
+        result["model_type"] = getattr(current_model, "model_type", "unknown")
+        result["prediction_id"] = api_stats["total_predictions"]
+        result["timestamp"] = datetime.now().isoformat()
 
-        # Record A/B test result if applicable
-        if test_id:
-            model_key = "A" if ab_test and "model_a" in model_path else "B"
-            record_prediction_result(
-                test_id=test_id,
-                model=model_key,
-                prediction=result["prediction"][0],
-                ground_truth=ground_truth,
-                metadata={
-                    "features": feature_dict,
-                    "timestamp": datetime.now().isoformat(),
-                },
-            )
-            result["ab_test"] = {"test_id": test_id, "model": model_key}
-
-        # Store prediction in database (if enabled)
+        # Try to store prediction in database (optional)
         try:
             from src.model_serving.database import DatabaseClient
 
-            # Initialize database client
             db_client = DatabaseClient("oltp")
-
-            # Store prediction
             db_client.store_prediction(feature_dict, result)
-
-            # Close connection
             db_client.close()
-
             logger.info("Stored prediction in database")
         except Exception as db_error:
-            # Log error but don't fail the prediction request
-            logger.error(f"Error storing prediction in database: {db_error}")
+            logger.warning(f"Could not store prediction in database: {db_error}")
 
+        api_stats["successful_predictions"] += 1
         logger.info(f"Successful prediction: {result['prediction_label']}")
         return result
 
+    except HTTPException:
+        api_stats["failed_predictions"] += 1
+        raise
     except Exception as e:
+        api_stats["failed_predictions"] += 1
         logger.error(f"Error making prediction: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Error making prediction: {str(e)}"
-        )
-
-
-@app.get("/ab-tests")
-async def list_ab_tests():
-    """List all active A/B tests."""
-    try:
-        from src.ab_testing import ABTestRegistry
-
-        registry = ABTestRegistry()
-        active_tests = registry.list_active_tests()
-        all_tests = registry.list_all_tests()
-
-        return {"active_tests": active_tests, "all_tests": all_tests}
-    except Exception as e:
-        logger.error(f"Error listing A/B tests: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Error listing A/B tests: {str(e)}"
-        )
-
-
-@app.post("/ab-tests")
-async def create_ab_test(
-    name: str = Query(..., description="Name for the A/B test"),
-    model_a: str = Query(..., description="Path or name of model A (control)"),
-    model_b: str = Query(..., description="Path or name of model B (variant)"),
-    traffic_split: float = Query(
-        0.5, description="Percentage of traffic to route to model B (0-1)"
-    ),
-):
-    """Create a new A/B test."""
-    try:
-        from src.ab_testing import create_ab_test
-
-        test_id = create_ab_test(name, model_a, model_b, traffic_split)
-        return {"test_id": test_id, "status": "created"}
-    except Exception as e:
-        logger.error(f"Error creating A/B test: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Error creating A/B test: {str(e)}"
-        )
-
-
-@app.get("/ab-tests/{test_id}")
-async def get_ab_test(test_id: str):
-    """Get information about a specific A/B test."""
-    try:
-        from src.ab_testing import ABTestRegistry
-
-        registry = ABTestRegistry()
-        test = registry.get_test(test_id)
-
-        if test is None:
-            # Check if it's a completed test
-            all_tests = registry.list_all_tests()
-            completed_test = next((t for t in all_tests if t["id"] == test_id), None)
-
-            if completed_test:
-                return {"status": "completed", "test": completed_test}
-
-            raise HTTPException(
-                status_code=404, detail=f"A/B test with ID {test_id} not found"
-            )
-
-        return {
-            "id": test.id,
-            "name": test.name,
-            "model_a": test.model_a,
-            "model_b": test.model_b,
-            "traffic_split": test.traffic_split,
-            "status": test.status,
-            "start_time": test.start_time.isoformat(),
-            "sample_sizes": {"a": len(test.results_a), "b": len(test.results_b)},
-            "metrics": {"a": test.metrics_a, "b": test.metrics_b},
-            "comparison": test.comparison,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting A/B test: {e}")
-        raise HTTPException(status_code=500, detail=f"Error getting A/B test: {str(e)}")
-
-
-@app.post("/ab-tests/{test_id}/conclude")
-async def conclude_ab_test(
-    test_id: str,
-    winner: Optional[str] = Query(
-        None, description="Force winner selection ('A' or 'B')"
-    ),
-):
-    """Conclude an A/B test and optionally select a winner."""
-    try:
-        from src.ab_testing import ABTestRegistry
-
-        registry = ABTestRegistry()
-        conclusion = registry.conclude_test(test_id, winner)
-
-        if "status" in conclusion and conclusion["status"] == "error":
-            raise HTTPException(status_code=404, detail=conclusion["message"])
-
-        return {"status": "concluded", "conclusion": conclusion}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error concluding A/B test: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Error concluding A/B test: {str(e)}"
-        )
+        logger.error("Traceback: " + traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    # Ensure default model is loaded
-    model_path, _ = get_model_for_request()
+    """Health check endpoint with detailed status."""
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "uptime_seconds": (datetime.now() - api_stats["startup_time"]).total_seconds(),
+        "models_loaded": len(model_cache),
+        "statistics": api_stats.copy(),
+    }
 
-    if model_path not in model_cache:
-        model_type = "xgboost"  # Default
-        model_cache[model_path] = MushroomModel(model_path, model_type=model_type)
+    # Check model availability
+    if len(model_cache) == 0:
+        models_dir = os.path.join(project_root, "models")
+        if os.path.exists(models_dir):
+            model_files = [
+                f for f in os.listdir(models_dir) if f.endswith((".joblib", ".pkl"))
+            ]
+            health_status["available_models"] = model_files
+            if not model_files:
+                health_status["status"] = "degraded"
+                health_status["warning"] = "No model files found"
+        else:
+            health_status["status"] = "degraded"
+            health_status["warning"] = "Models directory not found"
+
+    return health_status
+
+
+@app.get("/models")
+async def list_models():
+    """List available models."""
+    models_dir = os.path.join(project_root, "models")
+    available_models = []
+
+    if os.path.exists(models_dir):
+        for file in os.listdir(models_dir):
+            if file.endswith((".joblib", ".pkl")):
+                file_path = os.path.join(models_dir, file)
+                file_stats = os.stat(file_path)
+                available_models.append(
+                    {
+                        "filename": file,
+                        "size_bytes": file_stats.st_size,
+                        "modified_time": datetime.fromtimestamp(
+                            file_stats.st_mtime
+                        ).isoformat(),
+                        "loaded": file
+                        in [
+                            model.model_path.split("/")[-1]
+                            for model in model_cache.values()
+                        ],
+                    }
+                )
 
     return {
-        "status": "ok",
-        "models_loaded": len(model_cache),
-        "default_model": model_path,
+        "models_directory": models_dir,
+        "loaded_models": len(model_cache),
+        "available_models": available_models,
     }
+
+
+@app.post("/test-prediction")
+async def test_prediction():
+    """Test endpoint with sample data."""
+    sample_features = MushroomFeatures(
+        cap_shape="convex",
+        cap_color="brown",
+        cap_surface="smooth",
+        gill_color="white",
+        gill_attachment="free",
+        stem_color="white",
+        ring_type="pendant",
+        habitat="woods",
+        cap_diameter=5.7,
+        stem_height=8.2,
+        stem_width=1.5,
+        does_bruise_or_bleed=True,
+        has_ring=True,
+    )
+
+    return await predict(sample_features)
 
 
 # Run the API with uvicorn when executed directly
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    logger.info("Starting API server with uvicorn...")
+    logger.info("API will be available at: http://localhost:8000")
+    logger.info("API documentation at: http://localhost:8000/docs")
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+        reload=False,  # Set to True for development
+    )

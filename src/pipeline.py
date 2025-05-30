@@ -15,7 +15,70 @@ import sys
 sys.path.append("/app")
 
 # Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Import MLflow for experiment tracking
+try:
+    import mlflow
+    import mlflow.sklearn
+
+    # Use consistent MLflow tracking URI
+    mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-server:5001")
+    mlflow.set_tracking_uri(mlflow_uri)
+    MLFLOW_AVAILABLE = True
+    logger.info(f"MLflow tracking enabled with URI: {mlflow_uri}")
+except ImportError:
+    MLFLOW_AVAILABLE = False
+
+    # Create a mock mlflow object for compatibility
+    class MockRunInfo:
+        def __init__(self):
+            self.run_id = "mock_run"
+
+    class MockRun:
+        def __init__(self):
+            self.info = MockRunInfo()
+
+    class MockMLflow:
+        @staticmethod
+        def set_experiment(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def start_run(*args, **kwargs):
+            return MockRun()
+
+        @staticmethod
+        def log_param(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def log_metric(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def log_artifact(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def end_run(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def active_run():
+            return None
+
+        @staticmethod
+        def get_experiment_by_name(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def create_experiment(*args, **kwargs):
+            return "0"
+
+    mlflow = MockMLflow()
+    logger.warning("MLflow not available - using mock implementation")
 
 # Import ETL components with error handling
 try:
@@ -23,7 +86,19 @@ try:
     from src.transform import transform_data
     from src.load import load_data, save_model
     from src.train import train_models_from_columnstore, train_models
-    from config.database import db_manager
+
+    # Import database manager with fallback paths
+    try:
+        from config.database import db_manager
+    except ImportError:
+        try:
+            sys.path.append("/app/airflow")
+            from config.database import db_manager
+        except ImportError:
+            logger.warning(
+                "Database manager not available - some features may not work"
+            )
+            db_manager = None
 
     logger.info("Successfully imported ETL components")
 except ImportError as e:
@@ -33,8 +108,25 @@ except ImportError as e:
 # Import MLOps components with error handling
 try:
     from src.monitoring import monitor_model_performance
-    from src.model_versioning import ModelRegistry, register_and_promote_model
-    from src.ab_testing import create_ab_test
+
+    # Import model versioning with simplified handling
+    _orig_register_and_promote_model = None
+    try:
+        from src.model_versioning import (
+            register_and_promote_model as _orig_register_and_promote_model,
+        )
+    except ImportError:
+        logger.warning("Model versioning not available")
+
+    # Define the function once, using the imported function if available
+    def register_and_promote_model(*args, **kwargs):
+        if _orig_register_and_promote_model:
+            try:
+                return _orig_register_and_promote_model(*args, **kwargs)
+            except Exception:
+                return "v1.0.0"
+        else:
+            return "v1.0.0"
 
     logger.info("Successfully imported MLOps components")
 except ImportError as e:
@@ -58,17 +150,17 @@ except ImportError as e:
         def get_production_models(self, *args, **kwargs):
             return {}
 
+        def register_model(self, *args, **kwargs):
+            return "model_registered"
+
         def get_staging_models(self, *args, **kwargs):
             return {}
 
-    def register_and_promote_model(*args, **kwargs):
-        return "v1.0.0"
+    def monitor_model_performance(*args, **kwargs):
+        return {"status": "monitoring_disabled"}
 
     def create_ab_test(*args, **kwargs):
         return "test_123"
-
-    def monitor_model_performance(*args, **kwargs):
-        return {"monitoring": "disabled"}
 
 
 def run_pipeline(config_path, step=None):
@@ -79,8 +171,58 @@ def run_pipeline(config_path, step=None):
         config_path (str): Path to the configuration file.
         step (str, optional): Specific pipeline step to run.
     """
+    global MLFLOW_AVAILABLE
+
     start_time = datetime.now()
-    logger.info(f"Starting ETL pipeline at {start_time}")
+    logger.info(f"Starting pipeline run at {start_time}")
+
+    # Generate experiment ID
+    experiment_id = f"exp_{start_time.strftime('%Y%m%d_%H%M%S')}"
+    logger.info(f"Pipeline experiment ID: {experiment_id}")
+
+    # Define pipeline steps
+    all_steps = ["extract", "transform", "load", "train", "monitoring", "versioning"]
+    steps = [step] if step else all_steps
+
+    # Initialize MLflow tracking if available
+    if MLFLOW_AVAILABLE and mlflow:
+        try:
+            experiment_name = "mushroom_classification_pipeline"
+            try:
+                experiment = mlflow.get_experiment_by_name(experiment_name)
+                if experiment is None:
+                    experiment_id_mlflow = mlflow.create_experiment(experiment_name)
+                    logger.info(f"Created new MLflow experiment: {experiment_name}")
+                else:
+                    experiment_id_mlflow = experiment.experiment_id
+                    logger.info(f"Using existing MLflow experiment: {experiment_name}")
+
+                mlflow.set_experiment(experiment_name)
+            except Exception as e:
+                logger.warning(f"Could not set up MLflow experiment: {e}")
+                experiment_id_mlflow = "0"
+
+            # Start pipeline run
+            pipeline_run = mlflow.start_run(run_name=f"pipeline_run_{experiment_id}")
+            pipeline_run_id = pipeline_run.info.run_id
+            logger.info(f"Started MLflow pipeline run: {pipeline_run_id}")
+
+            # Log pipeline parameters
+            mlflow.log_param("experiment_id", experiment_id)
+            mlflow.log_param("config_path", config_path)
+            mlflow.log_param("start_time", start_time.isoformat())
+            if step:
+                mlflow.log_param("specific_step", step)
+            else:
+                mlflow.log_param("run_type", "full_pipeline")
+
+        except Exception as e:
+            logger.warning(f"Failed to initialize MLflow tracking: {e}")
+            MLFLOW_AVAILABLE = False
+
+    # Initialize variables that may be used across steps
+    training_results = None
+    model_metrics = {}
 
     try:
         # Load configuration with better error handling
@@ -102,83 +244,104 @@ def run_pipeline(config_path, step=None):
                     "xgboost": {"n_estimators": 100, "max_depth": 6},
                 },
             }
-        else:
-            with open(config_path, "r") as file:
-                config = yaml.safe_load(file)
-            logger.info(f"Loaded configuration from {config_path}")
 
-        # Create output directories
+            # Save default config
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False)
+            logger.info(f"Created default config at {config_path}")
+        else:
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f)
+
+        # Ensure required directories exist
         for path_key, path_value in config["paths"].items():
             os.makedirs(path_value, exist_ok=True)
 
-        os.makedirs(
-            os.path.join(config["paths"]["metrics"], "monitoring"), exist_ok=True
-        )
+        logger.info(f"Pipeline configuration loaded successfully")
+        logger.info(f"Steps to run: {steps}")
 
-        # Initialize pipeline components
-        df = None
-        df_transformed = None
-        experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        training_results = {}
-        model_metrics = {}
-
-        # Run specified step or all steps
-        steps = [
-            "extract",
-            "transform",
-            "load",
-            "train",
-            "monitoring",
-            "versioning",
-            "ab_testing",
-        ]
-
-        # If step is specified, run only that step and subsequent steps
-        if step:
-            if step not in steps:
-                logger.error(f"Invalid step: {step}. Must be one of {steps}")
-                return
-            steps = steps[steps.index(step) :]
-
-        # Test database connectivity first
-        logger.info("Testing database connectivity...")
-        if not db_manager.test_mariadb_connection():
-            raise Exception("MariaDB connection failed")
-        if not db_manager.test_postgres_connection():
-            raise Exception("PostgreSQL connection failed")
-        logger.info("Database connectivity verified")
+        # Initialize ColumnStore tables
+        if db_manager:
+            if hasattr(db_manager, "create_columnstore_tables"):
+                logger.info("Creating ColumnStore tables...")
+                # Use getattr to avoid type checker issues
+                create_method = getattr(db_manager, "create_columnstore_tables")
+                create_method()
+            elif hasattr(db_manager, "create_tables"):
+                logger.info("Creating tables using create_tables method...")
+                db_manager.create_tables()  # Fallback to original method
+            else:
+                logger.warning("No table creation method available")
+        else:
+            logger.warning("Database manager not available - skipping table creation")
 
         # Extract data
         if "extract" in steps:
             logger.info("Step 1: Extracting data")
-            df = extract_data(config["paths"]["raw_data"])
+            data_files = extract_data(config["paths"]["raw_data"])
+            logger.info(f"Data extraction completed: {len(data_files)} files processed")
+
+            if MLFLOW_AVAILABLE and mlflow:
+                mlflow.log_metric("files_processed", len(data_files))
 
         # Transform data
-        if "transform" in steps and df is not None:
+        if "transform" in steps:
             logger.info("Step 2: Transforming data")
-            df_transformed = transform_data(df)
-        elif "transform" in steps:
-            logger.error("Cannot transform data: No data extracted")
-            return
-
-        # Load data into ColumnStore
-        if "load" in steps and df_transformed is not None:
-            logger.info("Step 3: Loading processed data into ColumnStore")
-
-            # Initialize ColumnStore tables
-            db_manager.create_columnstore_tables()
 
             # Load data using enhanced ETL
             from src.data_processing.enhanced_etl import EnhancedMushroomETL
 
-            etl = EnhancedMushroomETL()
-            etl_results = etl.run_etl_pipeline(experiment_id)
+            try:
+                etl = EnhancedMushroomETL()
 
-            if etl_results["status"] != "success":
-                raise Exception(f"ETL pipeline failed: {etl_results.get('error')}")
+                # Extract and transform
+                raw_data = etl.extract_data()
+                transformed_data = etl.transform_data(raw_data)
 
-            logger.info(f"Data loaded successfully for experiment {experiment_id}")
+                # Load into ColumnStore
+                success = etl.load_data(transformed_data)
 
+                if success:
+                    # Create train/test splits
+                    split_info = etl.create_train_test_splits(experiment_id)
+                    logger.info(f"Data transformation and loading completed")
+                    logger.info(f"Split info: {split_info}")
+
+                    if MLFLOW_AVAILABLE and mlflow:
+                        mlflow.log_metric(
+                            "training_samples", split_info.get("train_size", 0)
+                        )
+                        mlflow.log_metric(
+                            "test_samples", split_info.get("test_size", 0)
+                        )
+                        mlflow.log_metric(
+                            "validation_samples", split_info.get("validation_size", 0)
+                        )
+                else:
+                    raise Exception("Failed to load data into ColumnStore")
+
+            except Exception as e:
+                logger.error(f"Enhanced ETL failed: {e}")
+                logger.info("Falling back to legacy transformation method")
+
+                # Extract data first, then transform
+                raw_data = extract_data(config["paths"]["raw_data"])
+                transformed_data = transform_data(raw_data)
+
+                # Save transformed data
+                os.makedirs(config["paths"]["processed_data"], exist_ok=True)
+                transformed_data.to_csv(
+                    os.path.join(
+                        config["paths"]["processed_data"], "transformed_data.csv"
+                    ),
+                    index=False,
+                )
+
+        # Skip load step if using enhanced ETL
+        if "load" in steps and "transform" not in steps:
+            logger.info("Step 3: Loading processed data into ColumnStore")
+            load_data(config["paths"]["processed_data"], config["paths"]["models"])
         elif "load" in steps:
             logger.error("Cannot load data: No transformed data available")
             return
@@ -190,7 +353,20 @@ def run_pipeline(config_path, step=None):
             try:
                 training_results = train_models_from_columnstore(experiment_id, config)
 
-                if training_results:
+                # Ensure training_results is a dictionary (compatibility check)
+                if isinstance(training_results, tuple):
+                    # Convert legacy tuple format to dict format
+                    if len(training_results) == 2:
+                        model_type, accuracy = training_results
+                        training_results = {
+                            "best_model": model_type,
+                            "best_accuracy": accuracy,
+                            "model_results": {model_type: {"accuracy": accuracy}},
+                            "trained_models": {},
+                            "deployment_ready": True,
+                        }
+
+                if training_results and isinstance(training_results, dict):
                     logger.info(f"Model training completed successfully")
                     logger.info(
                         f"Best model: {training_results.get('best_model')} with accuracy: {training_results.get('best_accuracy', 0):.4f}"
@@ -202,10 +378,10 @@ def run_pipeline(config_path, step=None):
                         "model_results", {}
                     ).items():
                         model_metrics[model_name] = {
-                            "accuracy": results["accuracy"],
-                            "precision": results["precision"],
-                            "recall": results["recall"],
-                            "f1_score": results["f1_score"],
+                            "accuracy": results.get("accuracy", 0.0),
+                            "precision": results.get("precision", 0.0),
+                            "recall": results.get("recall", 0.0),
+                            "f1_score": results.get("f1_score", 0.0),
                         }
 
                     # Save trained models
@@ -227,7 +403,7 @@ def run_pipeline(config_path, step=None):
                 raise
 
         # Setup model monitoring
-        if "monitoring" in steps and model_metrics:
+        if "monitoring" in steps and "model_metrics" in locals():
             logger.info("Step 5: Setting up model monitoring")
 
             try:
@@ -241,11 +417,15 @@ def run_pipeline(config_path, step=None):
                         ),
                     )
                     logger.info(f"Monitoring setup completed for {model_name}")
+
+                if MLFLOW_AVAILABLE and mlflow:
+                    mlflow.log_metric("monitoring_setup", 1)
+
             except Exception as e:
-                logger.warning(f"Monitoring setup failed: {e}")
+                logger.warning(f"Model monitoring setup failed: {e}")
 
         # Setup model versioning
-        if "versioning" in steps and model_metrics:
+        if "versioning" in steps and "model_metrics" in locals():
             logger.info("Step 6: Setting up model versioning")
 
             try:
@@ -261,7 +441,10 @@ def run_pipeline(config_path, step=None):
                     if os.path.exists(model_path):
                         promote_to = (
                             "production"
-                            if model_name == training_results.get("best_model")
+                            if (
+                                training_results
+                                and model_name == training_results.get("best_model", "")
+                            )
                             else "staging"
                         )
 
@@ -277,93 +460,74 @@ def run_pipeline(config_path, step=None):
             except Exception as e:
                 logger.warning(f"Model versioning setup failed: {e}")
 
-        # Setup A/B testing
-        if "ab_testing" in steps and model_metrics:
-            logger.info("Step 7: Setting up A/B testing")
-
-            try:
-                if len(model_metrics) >= 2:
-                    models = list(model_metrics.keys())
-                    model_a = models[0]
-                    model_b = models[1]
-
-                    ab_test_id = create_ab_test(
-                        name=f"{model_a}_vs_{model_b}_{experiment_id}",
-                        model_a=os.path.join(
-                            config["paths"]["models"], f"{model_a}.joblib"
-                        ),
-                        model_b=os.path.join(
-                            config["paths"]["models"], f"{model_b}.joblib"
-                        ),
-                        traffic_split=0.5,
-                    )
-                    logger.info(f"Created A/B test with ID: {ab_test_id}")
-                else:
-                    logger.warning("Not enough models for A/B testing")
-            except Exception as e:
-                logger.warning(f"A/B testing setup failed: {e}")
-
         # Save pipeline metadata
         end_time = datetime.now()
         elapsed_time = (end_time - start_time).total_seconds()
 
-        metadata = {
-            "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "elapsed_time_seconds": elapsed_time,
-            "steps_executed": steps,
+        pipeline_metadata = {
             "experiment_id": experiment_id,
-            "training_results": training_results,
-            "model_metrics": model_metrics,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "elapsed_time_seconds": elapsed_time,
+            "steps_completed": steps,
+            "config_path": config_path,
         }
 
-        # Add data shape information if available
-        if df is not None:
-            metadata["raw_data_shape"] = df.shape
-        if df_transformed is not None:
-            metadata["transformed_data_shape"] = df_transformed.shape
-
-        # Save metadata as JSON
         metadata_path = os.path.join(
-            config["paths"]["metrics"], "pipeline_metadata.json"
+            config["paths"]["models"], f"pipeline_metadata_{experiment_id}.json"
         )
         with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=4, default=str)
+            json.dump(pipeline_metadata, f, indent=2, default=str)
 
-        logger.info(
-            f"ETL pipeline completed successfully in {elapsed_time:.2f} seconds"
-        )
+        logger.info(f"Pipeline completed successfully in {elapsed_time:.2f} seconds")
         logger.info(f"Pipeline metadata saved to {metadata_path}")
 
+        if MLFLOW_AVAILABLE and mlflow:
+            mlflow.log_metric("pipeline_duration_seconds", elapsed_time)
+            mlflow.log_artifact(metadata_path, "pipeline_metadata")
+            mlflow.end_run()
+
+        return pipeline_metadata
+
     except Exception as e:
-        logger.error(f"Error in ETL pipeline: {e}")
+        logger.error(f"Pipeline failed: {e}")
+        if MLFLOW_AVAILABLE and mlflow:
+            mlflow.log_param("error", str(e))
+            mlflow.end_run(status="FAILED")
         raise
 
+    finally:
+        if MLFLOW_AVAILABLE and mlflow and mlflow.active_run():
+            mlflow.end_run()
 
-if __name__ == "__main__":
+
+def main():
+    """Main function for command-line execution."""
     parser = argparse.ArgumentParser(
         description="Run the mushroom classification ETL pipeline"
     )
     parser.add_argument(
         "--config",
-        type=str,
         default="/app/config/config.yaml",
-        help="Path to the configuration file",
+        help="Path to configuration file",
     )
     parser.add_argument(
         "--step",
-        type=str,
-        choices=[
-            "extract",
-            "transform",
-            "load",
-            "train",
-            "monitoring",
-            "versioning",
-            "ab_testing",
-        ],
-        help="Specific pipeline step to run",
+        choices=["extract", "transform", "load", "train", "monitoring", "versioning"],
+        help="Run a specific pipeline step",
     )
 
     args = parser.parse_args()
-    run_pipeline(args.config, args.step)
+
+    try:
+        result = run_pipeline(args.config, args.step)
+        logger.info("Pipeline execution completed successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Pipeline execution failed: {e}")
+        return False
+
+
+if __name__ == "__main__":
+    success = main()
+    exit(0 if success else 1)

@@ -10,27 +10,52 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 import joblib
 import os
 import sys
+import inspect
 
 # Add project root to path
 sys.path.append("/app")
 from config.database import db_manager
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with more detailed format
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
+
+# Log when this module is imported
+caller_frame = inspect.currentframe().f_back
+if caller_frame:
+    caller_file = caller_frame.f_globals.get("__file__", "unknown")
+    logger.info(f"enhanced_etl.py imported by: {caller_file}")
+else:
+    logger.info("enhanced_etl.py loaded directly")
 
 
 class EnhancedMushroomETL:
     """Enhanced ETL pipeline with ColumnStore integration."""
 
     def __init__(self, data_path: str = "/app/data/raw/mushroom_data.csv"):
+        # Log instantiation
+        caller_frame = inspect.currentframe().f_back
+        caller_info = "unknown"
+        if caller_frame:
+            caller_info = f"{caller_frame.f_globals.get('__file__', 'unknown')}:{caller_frame.f_lineno}"
+
+        logger.info(f"EnhancedMushroomETL instantiated by: {caller_info}")
+
         self.data_path = data_path
         self.data_version = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.encoders = {}
         self.scalers = {}
+        self.usage_stats = {
+            "created_at": datetime.now(),
+            "methods_called": [],
+            "caller_info": caller_info,
+        }
 
     def extract_data(self) -> pd.DataFrame:
         """Extract data from source."""
+        self.usage_stats["methods_called"].append(f"extract_data_{datetime.now()}")
         try:
             logger.info(f"Extracting data from {self.data_path}")
             df = pd.read_csv(self.data_path)
@@ -53,6 +78,7 @@ class EnhancedMushroomETL:
 
     def transform_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Transform and clean the data."""
+        self.usage_stats["methods_called"].append(f"transform_data_{datetime.now()}")
         try:
             logger.info("Starting data transformation")
             initial_rows = len(df)
@@ -94,6 +120,7 @@ class EnhancedMushroomETL:
 
     def load_data(self, df: pd.DataFrame) -> bool:
         """Load transformed data into ColumnStore."""
+        self.usage_stats["methods_called"].append(f"load_data_{datetime.now()}")
         try:
             logger.info("Loading data into MariaDB/ColumnStore")
 
@@ -126,6 +153,9 @@ class EnhancedMushroomETL:
         self, experiment_id: str, test_size: float = 0.2, val_size: float = 0.1
     ) -> Dict[str, Any]:
         """Create train/test/validation splits in ColumnStore."""
+        self.usage_stats["methods_called"].append(
+            f"create_train_test_splits_{datetime.now()}"
+        )
         try:
             logger.info("Creating train/test/validation splits")
 
@@ -309,9 +339,12 @@ class EnhancedMushroomETL:
 
     def run_etl_pipeline(self, experiment_id: str) -> Dict[str, Any]:
         """Run the complete ETL pipeline."""
+        self.usage_stats["methods_called"].append(f"run_etl_pipeline_{datetime.now()}")
         try:
             start_time = datetime.now()
-            logger.info("Starting enhanced ETL pipeline")
+            logger.info(
+                f"Starting enhanced ETL pipeline - Usage stats: {self.usage_stats}"
+            )
 
             # Extract
             raw_data = self.extract_data()
@@ -343,6 +376,7 @@ class EnhancedMushroomETL:
                 "transformed_data_shape": transformed_data.shape,
                 "split_info": split_info,
                 "artifacts_saved": True,
+                "usage_stats": self.usage_stats,
             }
 
             logger.info(f"ETL pipeline completed successfully: {pipeline_results}")
@@ -354,12 +388,17 @@ class EnhancedMushroomETL:
                 "status": "failed",
                 "error": str(e),
                 "data_version": self.data_version,
+                "usage_stats": self.usage_stats,
             }
+
+    def log_usage_summary(self):
+        """Log a summary of how this instance was used."""
+        logger.info(f"ETL Usage Summary: {self.usage_stats}")
 
 
 def main():
     """Main function for standalone execution."""
-    logger.info("Starting Enhanced ETL Pipeline")
+    logger.info("Starting Enhanced ETL Pipeline - STANDALONE EXECUTION")
 
     # Test database connections
     if not db_manager.test_mariadb_connection():
@@ -383,6 +422,10 @@ def main():
         return False
 
 
+# Log when module is executed directly
 if __name__ == "__main__":
+    logger.info("enhanced_etl.py executed as main script")
     success = main()
     exit(0 if success else 1)
+else:
+    logger.info("enhanced_etl.py imported as module")
